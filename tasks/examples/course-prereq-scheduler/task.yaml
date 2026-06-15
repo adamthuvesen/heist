@@ -1,0 +1,46 @@
+id: course-prereq-scheduler
+title: Course scheduler respects prereqs, credit caps, cycles, and missing dependencies
+category: repo-debugging
+difficulty: example
+prompt: |
+  Fix the course prerequisite scheduler under `src/scheduler/`.
+
+  `plan_schedule(courses, config)` produces a quarter-by-quarter course plan
+  from a set of courses with prerequisites and credit caps. The seed
+  implementation packs ready courses into each quarter without respecting the
+  credit cap and never rejects cycle, missing, or overweight courses.
+
+  Contract:
+
+  - `courses` is a list of dictionaries with `id`, `credits`, and `prereqs`
+    (a list of course ids that must complete in a strictly earlier quarter).
+  - `config` is `{"max_credits_per_quarter": int, "max_quarters": int}`.
+  - Each quarter's total credits must be ≤ `max_credits_per_quarter`.
+  - A course can be scheduled in quarter `i` only if every course in its
+    `prereqs` is scheduled in a quarter `< i`.
+  - Tie-breaking is deterministic: ready courses are considered in ascending
+    `id` order; within a quarter, courses are listed sorted by `id`. When
+    packing a quarter, take ready courses in `id` order and skip any whose
+    `credits` would exceed the remaining cap; the next smaller-id course may
+    still fit.
+  - Courses that can never be scheduled go into `rejections`:
+    - `cycle` — course is in a prerequisite cycle.
+    - `missing_prereq` — course depends on a course id not present in input.
+    - `overweight` — course's own `credits` exceeds `max_credits_per_quarter`.
+  - A course whose prereq is itself rejected (overweight, missing, or
+    cyclic) is not itself rejected — its prereq simply never completes, so
+    it ends up in `deferred` if `max_quarters` are exhausted.
+  - Courses that became ready but did not fit before `max_quarters` were
+    used go into `deferred`.
+  - A helper for cycle detection lives at `src/scheduler/graph.py` and is
+    already imported but unused by the seed.
+
+  Return shape:
+  `{"schedule": [[course_id, ...], ...], "deferred": [course_id, ...],
+    "rejections": {course_id: "cycle" | "missing_prereq" | "overweight"}}`.
+  Inner schedule lists and `deferred` are sorted by course id.
+
+  The hidden grader covers linear chains, parallel packing, credit-cap
+  splitting, cycles, missing prereqs, overweight courses, max-quarters
+  deferral, and a small generated deterministic case.
+visible_test_command: ["python", "-m", "pytest", "-q"]

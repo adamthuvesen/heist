@@ -1,0 +1,51 @@
+id: notification-routing
+title: Notification router applies rule precedence, channel capabilities, DND windows, and fallbacks
+category: repo-debugging
+difficulty: example
+prompt: |
+  Fix the notification router under `src/notify/`.
+
+  `route_notifications(messages, users, channels, rules, now)` decides which
+  channel should deliver each message, or whether to reject it. The seed
+  implementation routes by the first enabled channel under a matched rule, but
+  production routing must respect rule precedence, channel capabilities, user
+  do-not-disturb windows, fallback chains, and duplicate idempotency.
+
+  Contract:
+
+  - Messages are dictionaries with `id`, `recipient` (user id), `type`,
+    `priority`, and `sent_at` (ISO-8601 UTC). `type` is one of `alert`,
+    `marketing`, `transactional`, `digest`. `priority` is one of `low`,
+    `normal`, `urgent`.
+  - `users[user_id]` has `timezone` (a fixed offset like `"+02:00"`),
+    `channels` (mapping channel id to `{"enabled": bool}`), and optional
+    `dnd` with `start` and `end` as local-time `"HH:MM"` strings. If `dnd`
+    is missing, the user has no quiet hours. If `start > end`, the window
+    wraps overnight (e.g., `22:00-07:00`).
+  - `channels[channel_id]` has `capabilities`: the list of message `type`
+    values this channel can carry.
+  - `rules` is an ordered list of `{"match": {...}, "route": [...],
+    "fallback": [...]}`. `match` may filter by `type` and/or `priority`;
+    a missing key matches anything. The first matching rule wins.
+  - For each message, evaluate the matched rule's `route` channels in order:
+    skip any that are disabled for the user, lack the message's `type`
+    capability, or are blocked by the user's DND (unless `priority` is
+    `urgent`). Send to the first remaining channel. If none qualify, try the
+    `fallback` chain the same way.
+  - If neither the route nor the fallback produces a channel, reject with
+    reason `dnd` if a DND check filtered out a viable channel, otherwise
+    `no_capable_channel`. If the message's recipient is not in `users`,
+    reject with `user_unknown`. If no rule matches, reject with `no_rule`.
+  - Duplicate message ids: after the first occurrence (in input order),
+    reject with reason `duplicate`.
+
+  Return shape:
+  `{"deliveries": [{"message", "channel", "user"}], "rejections": {...}}`.
+  `deliveries` is sorted by `(sent_at, message_id)`. `rejections` is keyed
+  by message id with one of `dnd`, `no_capable_channel`, `user_unknown`,
+  `no_rule`, or `duplicate`.
+
+  The hidden grader covers rule precedence, capability filtering, DND
+  boundaries (including overnight windows), urgent overrides, fallback
+  chains, duplicate idempotency, and a small generated deterministic case.
+visible_test_command: ["python", "-m", "pytest", "-q"]

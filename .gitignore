@@ -1,0 +1,12 @@
+.venv/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+# Raw run output stays local: it holds hidden graders, transcripts, diffs, and
+# per-check expectations that would leak the test set. The sanitized, leak-free
+# snapshot lives under results/ (committed) — see "Reproduce these numbers".
+runs/
+dist/
+*.egg-info/
+.DS_Store

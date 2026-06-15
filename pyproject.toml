@@ -1,0 +1,77 @@
+[project]
+name = "heist"
+version = "0.1.0"
+description = "HEIST — Hidden Evaluation of Integrated System Tasks. Local benchmark harness for CLI coding agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "polars>=1.0",
+    "pyarrow>=17.0",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "rich>=13",
+    "typer>=0.12",
+]
+
+# Optional repo-level defaults. CLI flags override this; a heist.toml at the
+# repo root overrides this in turn. See `heist config init` for a starter.
+# [tool.heist.defaults]
+# suite = "smoke"
+# jobs = 8
+# timeout_s = 300
+# output_dir = "runs"
+# progress = true
+# exit_on_failure = false
+#
+# [tool.heist.providers]
+# claude = 3
+# codex = 2
+# cursor = 4
+#
+# [tool.heist.selection]
+# default_agents = ["claude-opus-4.7-high", "codex-gpt-5.5-high", "cursor-composer-2.5"]
+#
+# [tool.heist.agents]
+# files = ["agents/custom.yaml"]
+
+[project.scripts]
+heist = "heist.cli:app"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0.0",
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+# Only needed to redraw the README figures via `make figures`; not required by
+# the harness, the test suite, or CI.
+figures = [
+    "matplotlib>=3.8",
+    "pillow>=10.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/heist"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]

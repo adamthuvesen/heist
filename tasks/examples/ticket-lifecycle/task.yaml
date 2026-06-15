@@ -1,0 +1,47 @@
+id: ticket-lifecycle
+title: Support ticket replay handles ordering, duplicates, terminal guards, and reopen window
+category: repo-debugging
+difficulty: example
+prompt: |
+  Fix the support ticket replay engine under `src/support/`.
+
+  `process_tickets(events, config, now)` replays an append-only stream of support
+  ticket events and returns ticket state, accepted transitions, and rejected events.
+  The seed implementation handles open and resolve in input order, but production
+  replay must handle out-of-order events, duplicate ids, terminal-state guards, and
+  a bounded reopen window.
+
+  Contract:
+
+  - Events have `id`, `ticket_id`, `type`, `at` (ISO-8601 UTC), and type-specific
+    fields.
+  - Event types: `opened`, `assigned`, `responded`, `resolved`, `reopened`.
+  - `opened` carries `priority` and optional `assignee`; opening an already-open
+    `ticket_id` is rejected with reason `duplicate_open`.
+  - `assigned` carries `assignee`. `responded` carries `author`. `resolved`
+    carries `resolution`. `reopened` has no extra fields.
+  - Duplicate event ids are ignored after the first occurrence.
+  - Events are applied in chronological order by `(at, id)`, regardless of input
+    order.
+  - Events targeting an unknown ticket are rejected with reason `unknown_ticket`.
+  - Events on a `resolved` ticket are rejected with reason `terminal`, except a
+    `reopened` arriving within `config["reopen_window_seconds"]` of the resolve
+    time.
+  - A `reopened` outside the window is rejected with reason `reopen_window`.
+  - States: `open` (after `opened`), `assigned` (after `assigned`),
+    `in_progress` (after first `responded`), `resolved` (after `resolved`).
+    A `reopened` returns the ticket to `open` and clears `resolution` and
+    `resolved_at`.
+  - Return shape:
+    `{"tickets": {ticket_id: {...}}, "transitions": [...], "rejections": {...}}`.
+    Each ticket dict has `state`, `priority`, `assignee` (str or None),
+    `resolution` (str or None), `opened_at`, and `resolved_at` (str or None).
+    `tickets` is keyed in first-`opened` chronological order. `transitions` is
+    a list of `{"ticket", "from", "to", "at", "event"}` in accepted-event order.
+    `rejections` is keyed by event id with one of `duplicate`, `duplicate_open`,
+    `unknown_ticket`, `terminal`, `reopen_window`.
+
+  The hidden grader covers chronological replay, duplicate idempotency, terminal
+  guards, reopen window boundaries, unknown-ticket rejection, and a small
+  generated case with shuffled input.
+visible_test_command: ["python", "-m", "pytest", "-q"]

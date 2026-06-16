@@ -764,10 +764,7 @@ def render_html(
         "{{MAST_LEFT}}": "HEIST · Frontier Suite",
         "{{RUN_DATE}}": datetime.now().strftime("%-d %b %Y"),
         "{{KIND_BADGE}}": _render_kind_badge(replay_source_run_id),
-        "{{MAST_TITLE}}": (
-            f"{_word_count(n_tasks).capitalize()} tasks.<br>"
-            f"{_word_count(n_agents).capitalize()} <em>agents.</em>"
-        ),
+        "{{MAST_TITLE}}": "HEIST",
         "{{AGENT_LIST}}": " · ".join(
             _esc(_short_agent_label(str(a["label"])))
             for a in sorted(

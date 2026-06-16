@@ -427,10 +427,14 @@ def _format_narrative_blocks(summary: list[dict[str, object]]) -> str:
     # Identify rank-based callouts.
     max_cost = max((a["cost"] for a in summary if a["cost"] > 0), default=0.0)
     # "Fastest" uses success-only mean so a model that gives up quickly on hard
-    # tasks doesn't get crowned the speed leader.
-    min_lat = min(
-        (a["lat_success_median"] for a in summary if a["lat_success_median"] > 0),
-        default=0.0,
+    # tasks doesn't get crowned the speed leader. Award it to the exact argmin
+    # agent (mirroring best_per_win_id) rather than a float tolerance, so two
+    # near-tied agents can't both be crowned.
+    lat_eligible = [a for a in summary if a["lat_success_median"] > 0]
+    fastest_lat_id = (
+        min(lat_eligible, key=lambda a: a["lat_success_median"])["agent_id"]
+        if lat_eligible
+        else None
     )
     max_wins = max(a["wins"] for a in summary)
     eligible = [a for a in summary if a["wins"] > 0 and a["cost"] > 0]
@@ -447,7 +451,7 @@ def _format_narrative_blocks(summary: list[dict[str, object]]) -> str:
             callouts.append(f"Most clean passes of the {_word_count(len(summary))}")
         if max_cost > 0 and float(a["cost"]) == max_cost:
             callouts.append(f"Most expensive run at ${float(a['cost']):.2f}")
-        if min_lat > 0 and abs(float(a["lat_success_median"]) - min_lat) < 0.5:
+        if a["agent_id"] == fastest_lat_id:
             callouts.append("Fastest agent on median passing-task latency")
         if a["agent_id"] == best_per_win_id and int(a["wins"]) > 0:
             per_win = float(a["cost"]) / int(a["wins"])
@@ -534,8 +538,12 @@ def _build_run_json(
     tasks = sorted(by_task)
     n_tasks = len(tasks)
     n_agents = len(summary)
-    all_perfect = sum(1 for rs in by_task.values() if all(r.score == 1.0 for r in rs))
-    all_ge90 = sum(1 for rs in by_task.values() if all(r.score >= 0.90 for r in rs))
+    # `rs` is non-empty in practice (by_task is built from results), but guard
+    # the empty case so it isn't vacuously counted as "all perfect". Note the
+    # `== 1.0` bar is stricter than a "win" (score >= 0.999): all_perfect counts
+    # only literally-perfect tasks.
+    all_perfect = sum(1 for rs in by_task.values() if rs and all(r.score == 1.0 for r in rs))
+    all_ge90 = sum(1 for rs in by_task.values() if rs and all(r.score >= 0.90 for r in rs))
 
     data = {
         "agents": agents_data,

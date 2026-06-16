@@ -66,6 +66,43 @@ def test_unsandboxed_path_mention_contaminates(tmp_path: Path) -> None:
     assert access.attempted is None
 
 
+def test_detect_flags_relative_grader_path(tmp_path: Path) -> None:
+    # A grader read via a relative path (cd into the task dir, then
+    # `cat hidden/grader.py`) leaves no absolute path in the transcript but must
+    # still be caught.
+    task = _marker_task(tmp_path)
+    stdout = tmp_path / "stdout.txt"
+    stdout.write_text("cd into the task dir, then: cat hidden/grader.py\n")
+    (tmp_path / "stderr.txt").write_text("")
+    access = detect_grader_access(stdout, tmp_path / "stderr.txt", task)
+    assert access.contaminated is not None
+    assert "hidden grader" in access.contaminated
+
+
+def test_detect_flags_task_qualified_relative_path(tmp_path: Path) -> None:
+    # The task id is a unique slug, so naming "<task_id>/reference" betrays a
+    # reach into the answer-key tree even without the absolute prefix.
+    task = _marker_task(tmp_path)
+    stdout = tmp_path / "stdout.txt"
+    stdout.write_text(f"opened {task.id}/reference/answer.txt\n")
+    (tmp_path / "stderr.txt").write_text("")
+    access = detect_grader_access(stdout, tmp_path / "stderr.txt", task)
+    assert access.contaminated is not None
+    assert "reference solution" in access.contaminated
+
+
+def test_detect_does_not_flag_bare_dir_words(tmp_path: Path) -> None:
+    # Guard against over-broad needles: prose mentioning "hidden" or a
+    # "reference" implementation must not trip the detector.
+    task = _marker_task(tmp_path)
+    stdout = tmp_path / "stdout.txt"
+    stdout.write_text("I kept the helper hidden and added a reference comment.\n")
+    (tmp_path / "stderr.txt").write_text("")
+    access = detect_grader_access(stdout, tmp_path / "stderr.txt", task)
+    assert access.contaminated is None
+    assert access.attempted is None
+
+
 def test_detect_clean_transcript_passes(tmp_path: Path) -> None:
     task = _marker_task(tmp_path)
     stdout = tmp_path / "stdout.txt"

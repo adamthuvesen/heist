@@ -203,3 +203,41 @@ def test_run_benchmark_fail_fast_cancels_parallel_pending(tmp_path: Path) -> Non
     assert len(results) < 4, (
         f"fail-fast didn't skip any pending parallel jobs (got {len(results)}/4)"
     )
+
+
+def test_run_benchmark_fail_fast_drops_inflight_killed_jobs(tmp_path: Path) -> None:
+    # H3: a job killed mid-flight by the fail-fast SIGTERM must be DROPPED, not
+    # recorded as a spurious 'errored' row that blames the agent for the
+    # harness's own interruption. marker-a errors instantly and triggers the
+    # abort; marker-b's grader sleeps, so it is still mid-grade when the SIGTERM
+    # lands and its process group is killed.
+    write_marker_task(tmp_path, "marker-a")
+    write_marker_task(tmp_path, "marker-b")
+    tasks = select_tasks(suite="smoke", repo_root=tmp_path)
+
+    (tmp_path / "tasks" / "smoke" / "marker-a" / "hidden" / "grader.py").write_text(
+        "raise RuntimeError('boom')"
+    )
+    (tmp_path / "tasks" / "smoke" / "marker-b" / "hidden" / "grader.py").write_text(
+        'import time\ntime.sleep(0.8)\nprint(\'{"score":1.0,"passed":true,"checks":[]}\')\n'
+    )
+
+    _, results = run_benchmark(
+        repo_root=tmp_path,
+        suite="smoke",
+        agents=[_slow_agent("alpha", "pass")],
+        tasks=tasks,
+        runs_dir=tmp_path / "runs",
+        timeout_s=5,
+        run_id="fail-fast-inflight-run",
+        jobs=2,
+        fail_fast=True,
+    )
+
+    errored_ids = {r.task_id for r in results if r.outcome_status == "errored"}
+    # The genuine trigger is recorded...
+    assert "marker-a" in errored_ids, results
+    # ...but the interrupted-mid-flight job is not blamed as a failure.
+    assert "marker-b" not in errored_ids, (
+        f"interrupted job recorded as errored instead of dropped: {results}"
+    )

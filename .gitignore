@@ -5,7 +5,7 @@ __pycache__/
 *.pyc
 # Raw run output stays local: it holds hidden graders, transcripts, diffs, and
 # per-check expectations that would leak the test set. The sanitized, leak-free
-# snapshot lives under results/ (committed) — see "Reproduce these numbers".
+# snapshot lives under results/ (committed).
 runs/
 dist/
 *.egg-info/

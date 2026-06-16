@@ -163,7 +163,18 @@ def load_all_runs(
         except FileNotFoundError:
             results = []
         except Exception as exc:
-            logger.warning("could not load results.jsonl for %s: %s", manifest.run_id, exc)
+            # The manifest parsed but results.jsonl is unreadable/corrupt. Keep
+            # the scan resilient (one bad run must not break the whole listing),
+            # but log loudly at ERROR with the path — collapsing to an empty
+            # summary would otherwise be indistinguishable from a genuinely
+            # empty run, hiding real corruption in the corpus.
+            logger.error(
+                "corrupt results.jsonl for %s at %s: %s — summarising as empty, "
+                "row counts/scores for this run are unreliable",
+                manifest.run_id,
+                run_dir / "results.jsonl",
+                exc,
+            )
             results = []
         summaries.append(_summary_from_manifest(manifest, results))
     summaries.sort(key=lambda s: s.created_at, reverse=True)

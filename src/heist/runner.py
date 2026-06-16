@@ -898,6 +898,14 @@ def run_benchmark(
                         pgid_lock=pgid_lock,
                         sandbox=sandbox,
                     )
+                    # A fail-fast abort that fired while this job was mid-flight
+                    # SIGTERMs its agent's process group, so an 'errored' result
+                    # here reflects the interruption, not a real failure. Drop it
+                    # like every other aborted job rather than recording a
+                    # spurious failure row. A job that finished grading inside the
+                    # abort window ('graded') is real data and is kept.
+                    if abort_event.is_set() and result.outcome_status == "errored":
+                        raise _AbortedJob(index)
                     reporter.on_finish(agent, task, result)
                     return index, result
 

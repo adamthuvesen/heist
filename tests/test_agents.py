@@ -93,10 +93,22 @@ def test_opus_48_matches_prior_opus_command_at_high_effort() -> None:
     assert opus_48.command[opus_48.command.index("--effort") + 1] == "high"
 
 
+def test_opus_48_xhigh_uses_extra_high_effort() -> None:
+    opus_xhigh = DEFAULT_AGENTS["claude-opus-4.8-xhigh"]
+    opus_high = DEFAULT_AGENTS["claude-opus-4.8-high"]
+    assert opus_xhigh.provider == "claude"
+    assert opus_xhigh.model_id == "claude-opus-4-8"
+    assert opus_xhigh.command == [
+        part.replace("high", "xhigh") for part in opus_high.command
+    ]
+    assert opus_xhigh.command[opus_xhigh.command.index("--effort") + 1] == "xhigh"
+
+
 DEFAULT_AGENT_ORDER = [
     "codex-gpt-5.5-high",
     "codex-gpt-5.4-mini",
     "claude-opus-4.8-high",
+    "claude-opus-4.8-xhigh",
     "claude-opus-4.7-high",
     "claude-sonnet-4.6-high",
     "claude-haiku-4.5",

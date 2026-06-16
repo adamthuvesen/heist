@@ -18,7 +18,7 @@ class DefaultsConfig(BaseModel):
 
     suite: str = "smoke"
     jobs: PositiveInt = 1
-    timeout_s: PositiveInt = 300
+    timeout_s: PositiveInt = 1800
     output_dir: str = "runs"
     progress: bool = True
     exit_on_failure: bool = False
@@ -206,7 +206,7 @@ def render_starter_config() -> str:
 [defaults]
 suite           = "smoke"
 jobs            = 8           # max concurrent (agent, task) jobs across all providers
-timeout_s       = 300         # per-task timeout when task.yaml does not override
+timeout_s       = 1800        # per-task timeout when task.yaml does not override
 output_dir      = "runs"      # where run directories are written
 progress        = true        # live rich table when stdout is a TTY
 exit_on_failure = false       # set true in CI to fail the process on errors
@@ -221,7 +221,7 @@ opencode = 2
 # Agent ids used when `heist run` has no --agent, --provider, or --all-agents.
 # Leave empty to use every built-in default agent.
 default_agents = [
-  "claude-opus-4.7-high",
+  "claude-opus-4.8-xhigh",
   "codex-gpt-5.5-high",
   "cursor-composer-2.5",
 ]

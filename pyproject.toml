@@ -26,7 +26,7 @@ dependencies = [
 # [tool.heist.defaults]
 # suite = "smoke"
 # jobs = 8
-# timeout_s = 300
+# timeout_s = 1800
 # output_dir = "runs"
 # progress = true
 # exit_on_failure = false
@@ -37,7 +37,7 @@ dependencies = [
 # cursor = 4
 #
 # [tool.heist.selection]
-# default_agents = ["claude-opus-4.7-high", "codex-gpt-5.5-high", "cursor-composer-2.5"]
+# default_agents = ["claude-opus-4.8-xhigh", "codex-gpt-5.5-high", "cursor-composer-2.5"]
 #
 # [tool.heist.agents]
 # files = ["agents/custom.yaml"]

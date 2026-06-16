@@ -66,12 +66,32 @@ def _read_tail(path: str | Path | None, cap: int = _TRANSCRIPT_READ_CAP) -> str:
     return data.decode(errors="replace")
 
 
-def _path_variants(path: Path) -> set[str]:
-    """The path plus its symlink-resolved form, so an agent can't dodge the check
-    by reading through an alias (e.g. /tmp -> /private/tmp on macOS)."""
+def _path_variants(path: Path, task_id: str) -> set[str]:
+    """Needles that betray a read of ``path`` for this task. Includes the absolute
+    path and its symlink-resolved form (an agent can't dodge the check by reading
+    through an alias like /tmp -> /private/tmp on macOS), plus task-relative forms
+    — ``<task_id>/hidden/grader.py`` and the trailing ``hidden/grader.py`` — so a
+    grader read via a relative path (``cd`` into the task dir, then ``cat
+    hidden/grader.py``) is still caught.
+
+    This transcript scan is best-effort: it can only flag paths the agent named in
+    its output. The real guarantee that the answer key is unreadable is
+    ``sandbox_wrap``; this check is a second line of defense, not the only one."""
     variants = {str(path)}
     with contextlib.suppress(OSError):
         variants.add(os.path.realpath(path))
+    leaf = path.name  # "hidden" or "reference"
+    if leaf:
+        # Task-qualified directory: the task id is a unique slug, so a mention
+        # of "<task_id>/hidden" means the agent reached into this task's
+        # answer-key tree by absolute OR relative path.
+        variants.add(f"{task_id}/{leaf}")
+        if leaf == "hidden":
+            # The grader file itself, caught even when read after a `cd` into
+            # the task dir leaves only a bare "hidden/grader.py" in the
+            # transcript. Specific enough not to false-positive on prose.
+            variants.add("hidden/grader.py")
+            variants.add(f"{task_id}/hidden/grader.py")
     return {variant for variant in variants if variant}
 
 
@@ -93,7 +113,7 @@ def detect_grader_access(
         ("hidden grader", task.hidden_path),
         ("reference solution", task.reference_path),
     ):
-        for needle in _path_variants(Path(base)):
+        for needle in _path_variants(Path(base), task.id):
             if needle in transcript:
                 if sandboxed:
                     return GraderAccess(

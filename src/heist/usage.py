@@ -148,11 +148,13 @@ def _per_line_usage(payload: object) -> tuple[int, int, int, int]:
     best_cache_read = 0
     best_cache_write = 0
     for obj in _objects(payload):
-        obj_input = max(0, *(_int_value(obj.get(key)) for key in INPUT_KEYS))
-        obj_output = max(0, *(_int_value(obj.get(key)) for key in OUTPUT_KEYS))
-        obj_cache_read = max(0, *(_int_value(obj.get(key)) for key in CACHE_READ_KEYS))
-        obj_cache_write = max(0, *(_int_value(obj.get(key)) for key in CACHE_WRITE_KEYS))
-        subset_cache = max(0, *(_int_value(obj.get(key)) for key in OPENAI_SUBSET_CACHE_KEYS))
+        obj_input = max((_int_value(obj.get(key)) for key in INPUT_KEYS), default=0)
+        obj_output = max((_int_value(obj.get(key)) for key in OUTPUT_KEYS), default=0)
+        obj_cache_read = max((_int_value(obj.get(key)) for key in CACHE_READ_KEYS), default=0)
+        obj_cache_write = max((_int_value(obj.get(key)) for key in CACHE_WRITE_KEYS), default=0)
+        subset_cache = max(
+            (_int_value(obj.get(key)) for key in OPENAI_SUBSET_CACHE_KEYS), default=0
+        )
         if subset_cache > 0 and obj_input >= subset_cache:
             obj_input -= subset_cache
         best_input = max(best_input, obj_input)
@@ -193,8 +195,14 @@ def capture_usage(text: str) -> UsageCapture:
 
 
 # (input, output, cache_read, cache_write) in USD per million tokens.
-# `inputTokens` and `cacheReadTokens` are treated as disjoint pools, matching
-# cursor-agent's Anthropic-style stream-json field naming.
+# `input` and `cache_read` are treated as DISJOINT pools and priced separately
+# below — this is the load-bearing invariant for cost accuracy. It holds for
+# every provider here: Anthropic/cursor stream-json reports them as separate
+# fields, and OpenAI-style payloads (which fold cached tokens into the input
+# total) are normalised in `_per_line_usage` by subtracting OPENAI_SUBSET_CACHE_KEYS
+# from input before they reach here. A future provider that reports cache-read
+# tokens *inside* its input count under a non-OpenAI key would double-count;
+# test_cost_for_usage_* locks this invariant so that regression is caught.
 #
 # PRICING_LAST_VERIFIED: 2026-06-14
 # Sources:

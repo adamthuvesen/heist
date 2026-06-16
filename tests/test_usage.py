@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from heist.models import TokenUsage, UsageCapture
-from heist.usage import capture_usage, choose_cost, cost_for_usage
+from heist.usage import PRICING_PER_MILLION, capture_usage, choose_cost, cost_for_usage
 
 
 def test_capture_usage_reads_codex_jsonl_shape() -> None:
@@ -32,6 +34,30 @@ def test_cost_for_usage_does_not_double_charge_openai_cached_input() -> None:
     # 92,647 non-cached input @ $5/M + 1,257,984 cache reads @ $0.5/M + 14,959 output @ $30/M.
     assert cost is not None
     assert round(cost, 4) == round((92_647 * 5 + 1_257_984 * 0.5 + 14_959 * 30) / 1_000_000, 4)
+
+
+def test_cost_for_usage_prices_disjoint_anthropic_cache_separately() -> None:
+    # Anthropic/cursor stream-json reports `input` and `cache_read` as DISJOINT
+    # pools. Cost must price cache_read at its own rate, never folding it into
+    # input (which would double-charge). This locks the invariant documented
+    # above PRICING_PER_MILLION so a future "fix" that subtracts cache_read from
+    # input for these providers is caught.
+    model = "claude-opus-4-8"
+    in_p, out_p, cr_p, cw_p = PRICING_PER_MILLION[model]
+    usage = TokenUsage(
+        input=1_000_000,
+        output=200_000,
+        cache_read=3_000_000,
+        cache_write=50_000,
+    )
+    cost = cost_for_usage(model, usage)
+    expected = (1_000_000 * in_p + 200_000 * out_p + 3_000_000 * cr_p + 50_000 * cw_p) / 1_000_000
+    assert cost == pytest.approx(expected)
+    # And cache_read genuinely contributes its own line item (not zero, not
+    # absorbed into input): dropping it lowers the cost by exactly cr_p per token.
+    assert cost_for_usage(model, usage.model_copy(update={"cache_read": 0})) == pytest.approx(
+        expected - 3_000_000 * cr_p / 1_000_000
+    )
 
 
 def test_capture_usage_reads_claude_cost_and_cache_tokens() -> None:

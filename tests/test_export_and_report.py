@@ -187,3 +187,29 @@ def test_eval_audit_export_handles_multi_agent_multi_task_mixed_outcomes(
     # fake-reported writes total_cost_usd before the grader is even run, so
     # the cost should survive the errored grader.
     assert by_pair[("fake-reported", "marker-b")]["cost_source"] == "reported"
+
+
+def test_eval_audit_export_empty_results_writes_typed_columns(tmp_path: Path) -> None:
+    # A run with no results must still produce a typed, columned parquet — not a
+    # schemaless 0-column one that breaks a downstream `select(["cost_usd", ...])`.
+    write_marker_task(tmp_path)
+    tasks = select_tasks(suite="smoke", repo_root=tmp_path)
+    manifest, results = run_benchmark(
+        repo_root=tmp_path,
+        suite="smoke",
+        agents=[fake_agent("pass")],
+        tasks=tasks,
+        runs_dir=tmp_path / "runs",
+        timeout_s=5,
+        run_id="export-empty-run",
+    )
+    populated_cols = pl.read_parquet(export_eval_audit(Path(manifest.run_dir), results)).columns
+
+    empty_path = export_eval_audit(Path(manifest.run_dir), [])
+    empty = pl.read_parquet(empty_path)
+
+    assert empty.height == 0
+    # Same column set as a populated export — no schema drift, no missing columns.
+    assert empty.columns == populated_cols
+    # The scalar columns a downstream consumer selects are present and selectable.
+    assert empty.select(["cost_usd", "success", "outcome_status"]).height == 0

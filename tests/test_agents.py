@@ -98,9 +98,7 @@ def test_opus_48_xhigh_uses_extra_high_effort() -> None:
     opus_high = DEFAULT_AGENTS["claude-opus-4.8-high"]
     assert opus_xhigh.provider == "claude"
     assert opus_xhigh.model_id == "claude-opus-4-8"
-    assert opus_xhigh.command == [
-        part.replace("high", "xhigh") for part in opus_high.command
-    ]
+    assert opus_xhigh.command == [part.replace("high", "xhigh") for part in opus_high.command]
     assert opus_xhigh.command[opus_xhigh.command.index("--effort") + 1] == "xhigh"
 
 

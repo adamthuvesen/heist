@@ -12,6 +12,7 @@ treats it as just another run for `list`, `compare`, and `history`.
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import threading
@@ -31,6 +32,8 @@ from heist.runner import (
 # on that prefix lets `SnapshotExecutor` propagate the same terminal outcome by
 # re-raising `MissingAgentEnv` — no per-error type code in the runner.
 _MISSING_ENV_RE = re.compile(r"agent '(?P<agent_id>[^']+)' requires env vars: (?P<vars>.+)")
+
+logger = logging.getLogger("heist.replay")
 
 
 class ReplayOfReplayError(RuntimeError):
@@ -193,8 +196,17 @@ class SnapshotExecutor:
                 try:
                     diff_path.write_bytes(source_diff.read_bytes())
                     return
-                except OSError:
-                    pass
+                except OSError as exc:
+                    # Never raise from diff capture, but don't silently swallow
+                    # the cause: an infra failure (permissions, ENOSPC) would
+                    # otherwise be indistinguishable from a genuinely missing
+                    # source diff once it reaches the marker below.
+                    logger.warning(
+                        "replay: could not copy source diff %s -> %s: %s",
+                        source_diff,
+                        diff_path,
+                        exc,
+                    )
         diff_path.write_text("<error: replay source diff missing>\n")
 
     # ------------------------------------------------------------------

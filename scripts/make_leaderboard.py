@@ -84,7 +84,7 @@ def main() -> int:
     parser.add_argument(
         "--run",
         type=Path,
-        default=Path("runs/frontier-2026-05-17"),
+        default=Path("runs/frontier-2026-06-15"),
         help="run directory containing results.jsonl",
     )
     parser.add_argument(

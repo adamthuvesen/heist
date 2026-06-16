@@ -13,8 +13,8 @@ check: lint format
 	uv run pytest tests/ -q
 
 # Sanitize a run's results.jsonl into the committed, leak-free leaderboard.
-# RUN overrides the source run dir (default: runs/frontier-2026-05-17).
-RUN ?= runs/frontier-2026-05-17
+# RUN overrides the source run dir (default: runs/frontier-2026-06-15).
+RUN ?= runs/frontier-2026-06-15
 leaderboard:
 	uv run python scripts/make_leaderboard.py --run $(RUN)
 

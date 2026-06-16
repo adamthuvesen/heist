@@ -17,7 +17,7 @@ A small compatibility shim renames the one legacy results column
 (``reported_run_total_cost_usd`` -> ``reported_session_cost_usd``) and drops keys
 the current model no longer carries, so an older snapshot still re-renders.
 
-    uv run python scripts/make_report.py --run runs/frontier-2026-05-17 --suite frontier
+    uv run python scripts/make_report.py --run runs/frontier-2026-06-15 --suite frontier
     make report
 """
 
@@ -66,7 +66,7 @@ def main() -> int:
     parser.add_argument(
         "--run",
         type=Path,
-        default=Path("runs/frontier-2026-05-17"),
+        default=Path("runs/frontier-2026-06-15"),
         help="run directory containing results.jsonl",
     )
     parser.add_argument(

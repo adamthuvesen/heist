@@ -291,7 +291,7 @@ def main() -> int:
     parser.add_argument(
         "--leaderboard",
         type=Path,
-        default=Path("results/frontier-2026-05-17/leaderboard.jsonl"),
+        default=Path("results/frontier-2026-06-15/leaderboard.jsonl"),
         help="published leaderboard.jsonl to plot",
     )
     parser.add_argument(

@@ -169,7 +169,8 @@
   .score-bars-head{ display:flex; align-items:baseline; justify-content:space-between; padding:0 28px 22px; }
   .score-bars-title{ font-weight:620; font-size:17px; margin:0; letter-spacing:-0.02em; }
   .score-bars-kicker{ font-size:12px; letter-spacing:0.02em; color:var(--ink-3); }
-  .score-bars-chart{ display:grid; grid-template-columns:46px 1fr; column-gap:8px; padding:0 28px; overflow-x:auto; }
+  .score-bars-chart{ display:grid; grid-template-columns:46px 1fr; column-gap:8px; padding:0 28px; overflow-x:auto; scrollbar-width:none; }
+  .score-bars-chart::-webkit-scrollbar{ display:none; }
   .score-bars-axis{ display:flex; flex-direction:column; justify-content:space-between; height:320px; font-family:"JetBrains Mono",monospace; font-size:10px; color:var(--ink-3); text-align:right; padding-right:10px; }
   /* single-row plot; column count is set inline by JS so any agent count fits */
   .score-bars-plot{ position:relative; display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); column-gap:10px; min-width:0; }

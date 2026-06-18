@@ -9,8 +9,8 @@ from heist.agents import DEFAULT_AGENTS, load_agent_file, resolve_agents
 
 
 def test_default_agents_use_strong_models() -> None:
-    codex = DEFAULT_AGENTS["codex-gpt-5.5-high"]
-    claude = DEFAULT_AGENTS["claude-opus-4.7-high"]
+    codex = DEFAULT_AGENTS["codex-gpt-5.5-xhigh"]
+    claude = DEFAULT_AGENTS["claude-opus-4.8-high"]
     cursor = DEFAULT_AGENTS["cursor-composer-2.5"]
 
     assert codex.command == [
@@ -22,11 +22,11 @@ def test_default_agents_use_strong_models() -> None:
         "--model",
         "gpt-5.5",
         "-c",
-        "model_reasoning_effort=high",
+        "model_reasoning_effort=xhigh",
         "-",
     ]
     assert codex.prompt_via_stdin is True
-    assert claude.model_id == "claude-opus-4-7"
+    assert claude.model_id == "claude-opus-4-8"
     assert claude.command[claude.command.index("--effort") + 1] == "high"
     assert claude.required_env == []
     assert cursor.command[:3] == ["cursor-agent", "-p", "--output-format"]
@@ -57,9 +57,9 @@ def test_cursor_factory_emits_byte_identical_command() -> None:
 
 
 def test_opencode_factory_emits_pty_wrapped_command() -> None:
-    agent = DEFAULT_AGENTS["openrouter-gemini-3.5-flash"]
+    agent = DEFAULT_AGENTS["openrouter-deepseek-v4-pro"]
     assert agent.provider == "opencode"
-    assert agent.model_id == "openrouter/google/gemini-3.5-flash"
+    assert agent.model_id == "openrouter/deepseek/deepseek-v4-pro"
     assert agent.required_env == ["OPENROUTER_API_KEY"]
     assert agent.env_overrides == {
         "XDG_DATA_HOME": "{agent_home}/xdg-data",
@@ -77,47 +77,48 @@ def test_opencode_factory_emits_pty_wrapped_command() -> None:
         "--dir",
         "{workspace}",
         "--model",
-        "openrouter/google/gemini-3.5-flash",
+        "openrouter/deepseek/deepseek-v4-pro",
         "{prompt}",
     ]
 
 
-def test_opus_48_matches_prior_opus_command_at_high_effort() -> None:
+def test_opus_48_uses_high_effort_claude_command() -> None:
     opus_48 = DEFAULT_AGENTS["claude-opus-4.8-high"]
-    opus_47 = DEFAULT_AGENTS["claude-opus-4.7-high"]
     assert opus_48.provider == "claude"
     assert opus_48.model_id == "claude-opus-4-8"
-    # Same invocation as the prior Opus run, only the model id differs — keeps
-    # the comparison matched (bypass permissions, stream-json, high effort).
-    assert opus_48.command == [part.replace("4-7", "4-8") for part in opus_47.command]
-    assert opus_48.command[opus_48.command.index("--effort") + 1] == "high"
+    # Bypass permissions, stream-json, high effort — the standard frontier
+    # Claude invocation, only the model id changes between Claude agents.
+    assert opus_48.command == [
+        "claude",
+        "-p",
+        "--permission-mode",
+        "bypassPermissions",
+        "--model",
+        "claude-opus-4-8",
+        "--effort",
+        "high",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "{prompt}",
+    ]
 
 
-def test_opus_48_xhigh_uses_extra_high_effort() -> None:
-    opus_xhigh = DEFAULT_AGENTS["claude-opus-4.8-xhigh"]
-    opus_high = DEFAULT_AGENTS["claude-opus-4.8-high"]
-    assert opus_xhigh.provider == "claude"
-    assert opus_xhigh.model_id == "claude-opus-4-8"
-    assert opus_xhigh.command == [part.replace("high", "xhigh") for part in opus_high.command]
-    assert opus_xhigh.command[opus_xhigh.command.index("--effort") + 1] == "xhigh"
+def test_xhigh_agent_uses_maximum_effort_flag() -> None:
+    codex = DEFAULT_AGENTS["codex-gpt-5.5-xhigh"]
+    assert codex.command[codex.command.index("-c") + 1] == "model_reasoning_effort=xhigh"
 
 
 DEFAULT_AGENT_ORDER = [
-    "codex-gpt-5.5-high",
+    "codex-gpt-5.5-xhigh",
     "codex-gpt-5.4-mini",
     "claude-opus-4.8-high",
-    "claude-opus-4.8-xhigh",
-    "claude-opus-4.7-high",
     "claude-sonnet-4.6-high",
-    "claude-haiku-4.5",
     "cursor-composer-2.5",
     "cursor-grok-4.3",
     "cursor-kimi-k2.5",
     "cursor-gemini-3.5-flash",
-    "openrouter-gemini-3.5-flash",
     "openrouter-deepseek-v4-pro",
-    "openrouter-kimi-k2.6",
-    "openrouter-qwen-2.5-coder-32b",
     "openrouter-qwen3.7-max",
 ]
 

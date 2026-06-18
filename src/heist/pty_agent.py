@@ -22,7 +22,14 @@ def main() -> int:
         print("usage: python -m heist.pty_agent <command> [args...]", file=sys.stderr)
         return 2
     status = pty.spawn(argv)
-    return os.waitstatus_to_exitcode(status)
+    exit_code = os.waitstatus_to_exitcode(status)
+    # A signal death comes back negative (e.g. -15 for SIGTERM). Returning it
+    # as-is makes SystemExit wrap it (256 + code → 241), which downstream reads
+    # as a meaningless exit code. Re-encode as the shell convention 128 + signum
+    # so the runner can recognise a signal kill (e.g. a harness abort).
+    if exit_code < 0:
+        return 128 - exit_code
+    return exit_code
 
 
 if __name__ == "__main__":

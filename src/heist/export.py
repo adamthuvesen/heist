@@ -10,6 +10,10 @@ from heist.usage import primary_cost as _primary_cost
 
 
 def export_eval_audit(run_dir: Path, results: list[TaskRunResult]) -> Path:
+    if not results:
+        # pl.DataFrame([]) writes a schema-less, zero-column parquet that the CLI
+        # would report as a success — fail loudly instead.
+        raise ValueError(f"run {run_dir} has no results to export")
     out_dir = run_dir / "eval-audit"
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -47,39 +51,5 @@ def export_eval_audit(run_dir: Path, results: list[TaskRunResult]) -> Path:
             }
         )
     path = out_dir / "runs.parquet"
-    frame = pl.DataFrame(rows) if rows else _empty_audit_frame()
-    frame.write_parquet(path)
+    pl.DataFrame(rows).write_parquet(path)
     return path
-
-
-def _empty_audit_frame() -> pl.DataFrame:
-    """A zero-row frame carrying the full audit column set, so a run with no
-    results still writes a typed, columned parquet instead of a schemaless 0-col
-    one that breaks a downstream `select(["cost_usd", "success", ...])`. The
-    template mirrors the row dict above; ``tests/test_export_and_report.py``
-    asserts the empty and populated column sets match, catching any drift."""
-    template = {
-        "agent_id": "",
-        "model_id": "",
-        "harness": "heist",
-        "run_id": "",
-        "task_id": "",
-        "task_category": "",
-        "seed": None,
-        "success": True,
-        "partial_credit": 0.0,
-        "outcome_status": "",
-        "tokens_in": 0,
-        "tokens_out": 0,
-        "tokens_in_by_model": {"": 0},
-        "tokens_out_by_model": {"": 0},
-        "latency_s": 0.0,
-        "timestamp": "",
-        "cost_usd": 0.0,
-        "cost_source": "",
-        "reconstructed_per_task_cost_usd": 0.0,
-        "reported_session_cost_usd": 0.0,
-        "cost_provenance": "",
-        "rerun_metadata": {"workspace_path": "", "diff_path": "", "grader_path": ""},
-    }
-    return pl.DataFrame([template]).clear()

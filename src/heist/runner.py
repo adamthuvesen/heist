@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import threading
@@ -36,6 +37,7 @@ from heist.reporting import render_markdown
 from heist.subprocess_utils import (
     GIT_BASE_ARGS,
     GIT_TIMEOUT_S,
+    KILL_GRACE_S,
     run_subprocess_safely,
     scrubbed_git_env,
 )
@@ -113,6 +115,16 @@ class MissingAgentEnv(ExecutorAborted):
         super().__init__(f"agent {agent_id!r} requires env vars: {', '.join(missing)}")
         self.agent_id = agent_id
         self.missing = missing
+
+
+def _require_agent_env(agent: AgentSpec) -> None:
+    """Raise MissingAgentEnv if the agent's declared env vars aren't set.
+
+    Checked before workspace prep so a misconfigured agent aborts without paying
+    for a workspace copy + git baseline on every task."""
+    missing = [name for name in agent.required_env if not os.environ.get(name)]
+    if missing:
+        raise MissingAgentEnv(agent.id, missing)
 
 
 def make_run_id() -> str:
@@ -287,9 +299,7 @@ def execute_agent(
         # references) so it cannot read the answer key off disk.
         command = sandbox_wrap(command, task.hidden_path.parents[2])
 
-    missing = [name for name in agent.required_env if not os.environ.get(name)]
-    if missing:
-        raise MissingAgentEnv(agent.id, missing)
+    _require_agent_env(agent)
 
     agent_home = artifact_dir / ".agent_home"
     agent_home.mkdir(parents=True, exist_ok=True)
@@ -323,6 +333,13 @@ def execute_agent(
     stdout_text = result.stdout.decode(errors="replace")
     stderr_text = result.stderr.decode(errors="replace")
     capture = capture_usage(f"{stdout_text}\n{stderr_text}")
+
+    # The agent's XDG dirs under .agent_home accumulate uv package archives,
+    # opencode snapshots, and logs — hundreds of MB per (agent, task) pair.
+    # stdout/stderr (the real debug surface) are already captured to disk and
+    # the run's outputs live in artifact_dir, so .agent_home is disposable.
+    shutil.rmtree(agent_home, ignore_errors=True)
+
     return AgentExecution(
         exit_code=result.returncode,
         timed_out=result.timed_out,
@@ -501,7 +518,10 @@ class LiveExecutor:
         self._sandbox = sandbox
 
     def prepare_workspace(self, *, agent: AgentSpec, task: TaskDefinition, workspace: Path) -> None:
-        del agent  # LiveExecutor seeds from the task definition, not the agent.
+        # Validate required env before the workspace copy + git baseline so a
+        # misconfigured agent aborts without paying that cost on every task.
+        # (Replay's executor reproduces missing-env from the snapshot instead.)
+        _require_agent_env(agent)
         copy_workspace(task, workspace)
         _baseline_workspace(workspace)
 
@@ -655,6 +675,11 @@ def _run_benchmark_job(
         )
 
     if execution.exit_code not in (0, None):
+        # A negative code is a signal death (e.g. -15 SIGTERM from a --fail-fast
+        # abort, or a crash); report it as such rather than as a bogus exit code
+        # so harness-initiated kills aren't mistaken for the agent's own failure.
+        code = execution.exit_code
+        detail = f"killed by signal {-code}" if code < 0 else f"exited with code {code}"
         return _errored_result(
             manifest=manifest,
             agent=agent,
@@ -663,7 +688,7 @@ def _run_benchmark_job(
             diff_path=diff_path,
             grader_path=grader_path,
             execution=execution,
-            error=f"agent exited with code {execution.exit_code}",
+            error=f"agent {detail}",
             attempted_grader_read=attempted,
         )
 
@@ -833,14 +858,24 @@ def run_benchmark(
 
     def _trigger_abort() -> None:
         abort_event.set()
-        # Hold pgid_lock across the killpg loop so a child cannot exit and
-        # have its pgid recycled by the OS between snapshot and signal —
-        # the registry stays authoritative for "is this pgid still ours?".
+        # Hold pgid_lock across the whole TERM→grace→KILL sequence so a child
+        # cannot exit and have its pgid recycled by the OS between snapshot and
+        # signal — the registry stays authoritative for "is this pgid still ours?".
         with pgid_lock:
-            for pgid in list(pgid_registry):
+            pgids = list(pgid_registry)
+            for pgid in pgids:
                 try:
                     os.killpg(pgid, signal.SIGTERM)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
+                    continue
+            # Escalate to SIGKILL: a SIGTERM-ignoring agent CLI (node/python
+            # wrappers under the PTY shim) would otherwise survive the abort and
+            # keep burning API budget. Mirror kill_process_group's grace window.
+            time.sleep(KILL_GRACE_S)
+            for pgid in pgids:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
                     continue
 
     try:
@@ -898,14 +933,6 @@ def run_benchmark(
                         pgid_lock=pgid_lock,
                         sandbox=sandbox,
                     )
-                    # A fail-fast abort that fired while this job was mid-flight
-                    # SIGTERMs its agent's process group, so an 'errored' result
-                    # here reflects the interruption, not a real failure. Drop it
-                    # like every other aborted job rather than recording a
-                    # spurious failure row. A job that finished grading inside the
-                    # abort window ('graded') is real data and is kept.
-                    if abort_event.is_set() and result.outcome_status == "errored":
-                        raise _AbortedJob(index)
                     reporter.on_finish(agent, task, result)
                     return index, result
 
@@ -1019,6 +1046,13 @@ def regrade_run(run_dir: Path, tasks: list[TaskDefinition]) -> list[TaskRunResul
                 f"but suite {manifest.suite!r} does not contain that task"
             )
         workspace = Path(result.workspace_path)
+        if not workspace.exists():
+            # The agent never produced a workspace (e.g. missing-env or an abort
+            # before setup). There's nothing to grade — carry the original row
+            # forward unchanged rather than grading an empty tree into a bogus
+            # 0.0 'graded' row that would mask the real failure.
+            regraded.append(result)
+            continue
         grader = run_hidden_grader(task, workspace)
         updated = result.model_copy(
             update={

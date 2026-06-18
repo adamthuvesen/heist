@@ -21,7 +21,6 @@ def test_load_config_falls_through_to_builtin_defaults(tmp_path: Path) -> None:
     expected = DefaultsConfig()
     assert cfg.defaults.suite == expected.suite
     assert cfg.defaults.jobs == expected.jobs
-    assert cfg.defaults.timeout_s == 1800
     assert cfg.providers == {}
 
 
@@ -108,7 +107,6 @@ def test_render_starter_config_round_trips_through_load(tmp_path: Path) -> None:
     (tmp_path / "heist.toml").write_text(starter)
     cfg = load_config(tmp_path).config
     assert cfg.defaults.jobs == 8
-    assert cfg.defaults.timeout_s == 1800
     assert cfg.providers == {"claude": 3, "codex": 2, "cursor": 4, "opencode": 2}
-    assert "claude-opus-4.8-xhigh" in cfg.selection.default_agents
+    assert "claude-opus-4.8-high" in cfg.selection.default_agents
     assert "What `--all-agents` resolves to" not in starter

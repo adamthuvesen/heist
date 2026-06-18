@@ -67,29 +67,20 @@ def _read_tail(path: str | Path | None, cap: int = _TRANSCRIPT_READ_CAP) -> str:
 
 
 def _path_variants(path: Path, task_id: str) -> set[str]:
-    """Needles that betray a read of ``path`` for this task. Includes the absolute
-    path and its symlink-resolved form (an agent can't dodge the check by reading
-    through an alias like /tmp -> /private/tmp on macOS), plus task-relative forms
-    — ``<task_id>/hidden/grader.py`` and the trailing ``hidden/grader.py`` — so a
-    grader read via a relative path (``cd`` into the task dir, then ``cat
-    hidden/grader.py``) is still caught.
+    """Needles that betray a read of ``path`` for this task.
 
-    This transcript scan is best-effort: it can only flag paths the agent named in
-    its output. The real guarantee that the answer key is unreadable is
-    ``sandbox_wrap``; this check is a second line of defense, not the only one."""
+    Includes absolute and symlink-resolved paths, plus task-relative forms so a
+    grader read via ``cd`` into the task dir then ``cat hidden/grader.py`` is
+    still caught. This scan is best-effort; ``sandbox_wrap`` is the hard
+    prevention layer.
+    """
     variants = {str(path)}
     with contextlib.suppress(OSError):
         variants.add(os.path.realpath(path))
-    leaf = path.name  # "hidden" or "reference"
+    leaf = path.name
     if leaf:
-        # Task-qualified directory: the task id is a unique slug, so a mention
-        # of "<task_id>/hidden" means the agent reached into this task's
-        # answer-key tree by absolute OR relative path.
         variants.add(f"{task_id}/{leaf}")
         if leaf == "hidden":
-            # The grader file itself, caught even when read after a `cd` into
-            # the task dir leaves only a bare "hidden/grader.py" in the
-            # transcript. Specific enough not to false-positive on prose.
             variants.add("hidden/grader.py")
             variants.add(f"{task_id}/hidden/grader.py")
     return {variant for variant in variants if variant}
@@ -142,5 +133,10 @@ def sandbox_wrap(command: list[str], tasks_root: Path) -> list[str]:
     if not command:
         return command
     deny = os.path.realpath(tasks_root)
-    profile = f'(version 1)(allow default)(deny file-read* (subpath "{deny}"))'
+    # The path is embedded in a double-quoted SBPL string; escape backslash and
+    # double-quote so a path containing either can't terminate the string early
+    # and silently weaken the deny rule. (defense-in-depth — repo paths rarely
+    # contain these, but a security policy shouldn't be built by raw interpolation.)
+    escaped = deny.replace("\\", "\\\\").replace('"', '\\"')
+    profile = f'(version 1)(allow default)(deny file-read* (subpath "{escaped}"))'
     return ["sandbox-exec", "-p", profile, *command]

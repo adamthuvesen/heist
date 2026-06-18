@@ -22,8 +22,8 @@ def test_resolve_agents_all_agents_returns_full_registry() -> None:
 
 
 def test_resolve_agents_exclude_drops_specific_agent() -> None:
-    selected = resolve_agents(agent_ids=None, all_agents=True, exclude=["claude-haiku-4.5"])
-    assert "claude-haiku-4.5" not in {agent.id for agent in selected}
+    selected = resolve_agents(agent_ids=None, all_agents=True, exclude=["cursor-grok-4.3"])
+    assert "cursor-grok-4.3" not in {agent.id for agent in selected}
 
 
 def test_resolve_agents_exclude_unknown_id_raises() -> None:
@@ -34,18 +34,18 @@ def test_resolve_agents_exclude_unknown_id_raises() -> None:
 def test_resolve_agents_uses_default_set_when_no_explicit_selection() -> None:
     selected = resolve_agents(
         agent_ids=None,
-        default_set=["claude-haiku-4.5", "codex-gpt-5.5-high"],
+        default_set=["claude-opus-4.8-high", "codex-gpt-5.5-xhigh"],
     )
     assert [agent.id for agent in selected] == [
-        "claude-haiku-4.5",
-        "codex-gpt-5.5-high",
+        "claude-opus-4.8-high",
+        "codex-gpt-5.5-xhigh",
     ]
 
 
 def test_resolve_agents_explicit_ids_beat_default_set() -> None:
     selected = resolve_agents(
         agent_ids=["cursor-composer-2.5"],
-        default_set=["claude-haiku-4.5"],
+        default_set=["claude-opus-4.8-high"],
     )
     assert [agent.id for agent in selected] == ["cursor-composer-2.5"]
 

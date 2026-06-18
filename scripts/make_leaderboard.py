@@ -10,7 +10,7 @@ expectations or a local home directory.
     output: results/<run-id>/leaderboard.jsonl (local only — not committed here)
 
 This produces a local leak-free leaderboard for your own analysis. The public
-repo no longer commits it; the published artifact is the aggregate report
+repo does not commit it; the published artifact is the aggregate report
 (results/<run>/report.html), guarded by tests/test_report_leakfree.py.
 """
 

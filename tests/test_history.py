@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -186,6 +187,36 @@ def test_baseline_registry_corrupt_file_raises(tmp_path: Path) -> None:
         BaselineRegistry.load(tmp_path)
 
 
+def test_baseline_registry_load_rejects_invalid_run_id(tmp_path: Path) -> None:
+    # A hand-edited baselines.json pointing a tag at a path-like value must be
+    # rejected at load, naming the file — not deferred to resolution time.
+    (tmp_path / "baselines.json").write_text('{"v1": "../../etc/passwd"}')
+    with pytest.raises(HistoryError, match="invalid run id"):
+        BaselineRegistry.load(tmp_path)
+
+
+def test_baseline_registry_load_rejects_reserved_tag(tmp_path: Path) -> None:
+    (tmp_path / "baselines.json").write_text('{"latest": "some-run"}')
+    with pytest.raises(HistoryError, match="reserved"):
+        BaselineRegistry.load(tmp_path)
+
+
+def test_load_all_runs_tolerates_naive_created_at(tmp_path: Path) -> None:
+    # A manifest with a naive (tz-less) created_at must not crash the sort in
+    # load_all_runs by comparing naive vs aware datetimes.
+    write_synthetic_run(tmp_path, "aware-run", created_at=datetime.now(UTC))
+    naive_dir = write_synthetic_run(tmp_path, "naive-run")
+    manifest_path = naive_dir / "manifest.json"
+    payload = json.loads(manifest_path.read_text())
+    payload["created_at"] = "2026-01-01T00:00:00"  # no offset → naive
+    manifest_path.write_text(json.dumps(payload))
+
+    summaries, _corrupt = load_all_runs(tmp_path)
+
+    run_ids = {s.run_id for s in summaries}
+    assert {"aware-run", "naive-run"} <= run_ids
+
+
 # ---------------------------------------------------------------------------
 # resolve_run_ref
 # ---------------------------------------------------------------------------
@@ -253,8 +284,10 @@ def test_resolve_run_ref_rejects_path_like_literal_refs(tmp_path: Path) -> None:
 
 
 def test_resolve_run_ref_rejects_corrupt_baseline_targets(tmp_path: Path) -> None:
+    # A path-like baseline target is now rejected when baselines.json is loaded
+    # (inside resolve_run_ref), naming the file, rather than deferred to lookup.
     (tmp_path / "baselines.json").write_text('{"v1": "../outside"}')
-    with pytest.raises(HistoryError, match="missing or invalid"):
+    with pytest.raises(HistoryError, match="invalid run id"):
         resolve_run_ref(tmp_path, "v1")
 
 

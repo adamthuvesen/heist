@@ -7,6 +7,7 @@ without a circular dependency on `runner.py` (which imports task helpers).
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import signal
 import subprocess
@@ -15,6 +16,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
+
+logger = logging.getLogger("heist.subprocess")
+
+# Bound on reaping a child after SIGKILL — the direct child should die almost
+# immediately once the group is killed; past this it is wedged (uninterruptible
+# sleep, or a grandchild that escaped the session holding the pipes open).
+REAP_TIMEOUT_S = 5.0
 
 # SIGTERM → SIGKILL grace for child process groups. Long enough for a
 # well-behaved agent to flush logs / usage summaries; short enough that a
@@ -156,9 +164,25 @@ def run_subprocess_safely(
             timed_out = True
             kill_process_group(process.pid)
             try:
-                out_bytes, err_bytes = process.communicate(timeout=5)
+                out_bytes, err_bytes = process.communicate(timeout=REAP_TIMEOUT_S)
             except subprocess.TimeoutExpired:
+                # SIGKILL hasn't taken effect within the grace window — either a
+                # grandchild escaped the session and is holding the pipes open,
+                # or the child is wedged. Re-issue SIGKILL to the group and reap
+                # the direct child so it isn't left as a zombie.
                 out_bytes, err_bytes = b"", b""
+                if pgid is not None:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(pgid, signal.SIGKILL)
+                try:
+                    process.wait(timeout=REAP_TIMEOUT_S)
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "could not reap child pid=%s (pgid=%s) after SIGKILL; "
+                        "leaving it for the OS",
+                        process.pid,
+                        pgid,
+                    )
         finally:
             if pgid is not None and pgid_registry is not None and pgid_lock is not None:
                 with pgid_lock:

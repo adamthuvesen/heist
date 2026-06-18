@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 from heist import difficulty
 from heist.models import TaskRunResult
-from heist.usage import cost_source_label as _cost_source
 from heist.usage import primary_cost as _primary_cost
 
 if TYPE_CHECKING:
@@ -22,12 +21,16 @@ if TYPE_CHECKING:
 SATURATION_THRESHOLD = 0.90
 
 
-# Headline metric is alpha (α): the difficulty-weighted mean of per-task scores
-# (see heist.difficulty). Public tasks declare no tier, so alpha equals the mean
-# score here. Wins (success@0.999) and mean are kept as secondary stats. Ranking
-# ties on alpha break by wins so the order stays deterministic and sensible.
+# Headline metric is alpha (α), the difficulty-weighted score; success@0.999
+# solve-rate (wins / tasks) is kept as a secondary column. Ranking ties on alpha
+# break by mean score so the order stays deterministic and sensible.
 def _solve_rate(wins: int, tasks: int) -> float:
     return wins / tasks if tasks else 0.0
+
+
+def _rank_key(a: dict[str, object]) -> tuple[float, float]:
+    """Primary ranking metric: alpha (α), ties broken by mean score."""
+    return (float(a["alpha"]), float(a["mean"]))
 
 
 _TEMPLATE_PATH = Path(__file__).parent / "templates" / "report.html"
@@ -38,6 +41,10 @@ _AGENT_SHORT_ID = {
     "claude-opus": "opus",
     "claude-sonnet": "sonnet",
     "claude-haiku": "haiku",
+    # More specific codex prefixes must precede "codex-gpt" — _short_agent_id
+    # prefix-matches in insertion order, so the mini variant needs its own id or
+    # it collapses onto "codex" and the two codex agents overwrite each other.
+    "codex-gpt-5.4-mini": "codexmini",
     "codex-gpt": "codex",
     "cursor-composer": "composer",
     "cursor-grok": "grok",
@@ -53,6 +60,7 @@ _AGENT_SHORT_ID = {
 _AGENT_TIER = {
     "opus": "flagship",
     "codex": "flagship",
+    "codexmini": "small",
     "sonnet": "mid-tier",
     "haiku": "small",
     "composer": "cursor flagship",
@@ -70,16 +78,15 @@ def _pct(value: float) -> str:
     return f"{value * 100:.1f}%"
 
 
-def _format_cost(value: float | None) -> str:
-    return "n/a" if value is None else f"${value:.4f}"
-
-
-def _format_time(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.1f}s"
-
-
 def _latency_median(values: list[float]) -> float:
     return statistics.median(values) if values else 0.0
+
+
+def _run_date_str() -> str:
+    # Avoid strftime("%-d") — the no-pad day directive is a glibc/BSD extension
+    # that breaks on Windows. Build the day without it.
+    dt = datetime.now()
+    return f"{dt.day} {dt:%b %Y}"
 
 
 _SHORT_LABEL_PREFIXES = ("Claude ", "Codex ", "Cursor ", "OpenRouter ")
@@ -102,7 +109,7 @@ def _render_score_chart(rows: list[dict[str, object]]) -> list[str]:
 
     ranked = sorted(
         rows,
-        key=lambda r: (float(r["alpha"]), int(r["successes"])),
+        key=lambda r: (float(r["alpha"]), float(r["mean_score"])),
         reverse=True,
     )
     bar_height = 10
@@ -154,7 +161,6 @@ class _AgentMetrics:
     wins: int
     ge90: int
     mean_score: float
-    alpha: float
     total_cost: float
     total_latency: float
     success_latency: float
@@ -163,6 +169,7 @@ class _AgentMetrics:
     clean_pass_count: int
     clean_pass_lat_median: float
     any_cost_estimated: bool
+    alpha: float
 
 
 def _compute_agent_metrics(results: list[TaskRunResult]) -> list[_AgentMetrics]:
@@ -177,8 +184,6 @@ def _compute_agent_metrics(results: list[TaskRunResult]) -> list[_AgentMetrics]:
         wins = sum(1 for r in graded if r.success)
         ge90 = sum(1 for r in agent_results if r.score >= 0.90)
         mean_score = sum(r.score for r in agent_results) / n if n else 0.0
-        # Public tasks declare no tier, so alpha equals the mean score here.
-        alpha = difficulty.sc_alpha((None, r.score) for r in agent_results)
         total_cost = sum(_primary_cost(r) or 0.0 for r in agent_results)
         total_latency = sum(r.latency_s or 0.0 for r in agent_results)
         all_latencies = [r.latency_s or 0.0 for r in agent_results]
@@ -186,12 +191,15 @@ def _compute_agent_metrics(results: list[TaskRunResult]) -> list[_AgentMetrics]:
         # "model that gives up sooner / thrashes on hard tasks".
         success_latencies = [r.latency_s or 0.0 for r in graded if r.success]
         success_latency = sum(success_latencies)
-        # Latency restricted to passing tasks that COMPLETED normally —
-        # excludes wall-clock-killed rows whose latency reflects the timeout
-        # cap rather than the agent's actual speed.
-        clean_pass = [r for r in agent_results if r.success and r.cost_source != "estimated"]
+        # Latency restricted to passing tasks that COMPLETED normally — excludes
+        # wall-clock-killed rows whose latency reflects the timeout cap rather
+        # than the agent's actual speed. Gate on the timeout signal itself, not
+        # cost provenance: a passing row's measured wall-clock latency is
+        # trustworthy even when its *cost* could only be estimated.
+        clean_pass = [r for r in agent_results if r.success and not r.timed_out]
         clean_pass_latencies = [r.latency_s or 0.0 for r in clean_pass]
         any_estimated = any(r.cost_source in ("reconstructed", "estimated") for r in agent_results)
+        alpha = difficulty.sc_alpha((r.task_id, r.score) for r in agent_results)
         rows.append(
             _AgentMetrics(
                 agent_id=agent_id,
@@ -201,7 +209,6 @@ def _compute_agent_metrics(results: list[TaskRunResult]) -> list[_AgentMetrics]:
                 wins=wins,
                 ge90=ge90,
                 mean_score=mean_score,
-                alpha=alpha,
                 total_cost=total_cost,
                 total_latency=total_latency,
                 success_latency=success_latency,
@@ -210,6 +217,7 @@ def _compute_agent_metrics(results: list[TaskRunResult]) -> list[_AgentMetrics]:
                 clean_pass_count=len(clean_pass),
                 clean_pass_lat_median=_latency_median(clean_pass_latencies),
                 any_cost_estimated=any_estimated,
+                alpha=alpha,
             )
         )
     return rows
@@ -225,8 +233,8 @@ def summarize_by_agent(results: list[TaskRunResult]) -> list[dict[str, object]]:
             "tasks": m.tasks,
             "successes": m.wins,
             "success_rate": m.wins / m.tasks if m.tasks else 0.0,
-            "alpha": m.alpha,
             "mean_score": m.mean_score,
+            "alpha": m.alpha,
             "total_cost": m.total_cost,
             "total_latency": m.total_latency,
             "success_latency": m.success_latency,
@@ -240,36 +248,33 @@ def summarize_by_agent(results: list[TaskRunResult]) -> list[dict[str, object]]:
 def render_markdown(results: list[TaskRunResult]) -> str:
     rows = summarize_by_agent(results)
     # Lead with the headline metric: rank agents by alpha (α), breaking ties on
-    # wins.
-    rows.sort(key=lambda r: (float(r["alpha"]), int(r["successes"])), reverse=True)
+    # mean score.
+    rows.sort(key=lambda r: (float(r["alpha"]), float(r["mean_score"])), reverse=True)
     saturated = [row for row in rows if row["saturated"]]
     lines = [
         "# HEIST Run Report",
         "",
         "## Summary",
         "",
-        "| Agent | Model | Tasks | Alpha (α) | Mean score | Cost | Time | Time (passed) |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "Ranked by alpha (α): each task is difficulty-weighted — hard tasks "
+        "count 3×, easy ones half.",
+        "",
+        "| Agent | Model | Tasks | alpha |",
+        "| --- | --- | ---: | ---: |",
     ]
     for row in rows:
-        success_latency_value = float(row["success_latency"]) if int(row["successes"]) else None
         lines.append(
-            "| {label} | `{model}` | {tasks} | {alpha} | "
-            "{mean_score} | {cost} | {latency} | {success_latency} |".format(
+            "| {label} | `{model}` | {tasks} | {alpha} |".format(
                 label=row["label"],
                 model=row["model_id"],
                 tasks=row["tasks"],
                 alpha=_pct(float(row["alpha"])),
-                mean_score=_pct(float(row["mean_score"])),
-                cost=_format_cost(float(row["total_cost"])),
-                latency=_format_time(float(row["total_latency"])),
-                success_latency=_format_time(success_latency_value),
             )
         )
 
     chart_lines = _render_score_chart(rows)
     if chart_lines:
-        lines.extend(["", "## Alpha (α) Ranking", "", "```text"])
+        lines.extend(["", "## alpha Ranking", "", "```text"])
         lines.extend(chart_lines)
         lines.append("```")
 
@@ -283,21 +288,6 @@ def render_markdown(results: list[TaskRunResult]) -> str:
     else:
         lines.append(f"Not saturated: no agent reached {_pct(SATURATION_THRESHOLD)} success.")
 
-    lines.extend(["", "## Task Results", ""])
-    lines.append("| Agent | Task | Category | Score | Status | Time | Cost | Cost source |")
-    lines.append("| --- | --- | --- | ---: | --- | ---: | ---: | --- |")
-    for result in sorted(results, key=lambda item: (item.agent_id, item.task_id)):
-        if result.outcome_status == "errored":
-            status = "errored"
-        elif result.success:
-            status = "pass"
-        else:
-            status = "fail"
-        lines.append(
-            f"| {result.agent_label} | `{result.task_id}` | {result.task_category} | "
-            f"{_pct(result.score)} | {status} | {_format_time(result.latency_s)} | "
-            f"{_format_cost(_primary_cost(result))} | {_cost_source(result)} |"
-        )
     lines.append("")
     return "\n".join(lines)
 
@@ -347,12 +337,10 @@ def _build_agent_summary(results: list[TaskRunResult]) -> list[dict[str, object]
     return summary
 
 
-def _format_abstract_cells(summary: list[dict[str, object]], n_no_pass: int) -> str:
-    """Build the four-cell abstract grid: alpha leader, mean leader, $/win, ceiling."""
-    by_alpha = max(summary, key=lambda a: (a["alpha"], a["wins"]))
-    by_mean = max(summary, key=lambda a: a["mean"])
-    eligible = [a for a in summary if a["wins"] > 0 and a["cost"] > 0]
-    best_per_win = min(eligible, key=lambda a: a["cost"] / a["wins"]) if eligible else None
+def _format_abstract_cells(summary: list[dict[str, object]], n_no_pass: int, n_tasks: int) -> str:
+    """Build the abstract grid: alpha leader, ≥90% leader, ceiling."""
+    by_alpha = max(summary, key=_rank_key)
+    by_ge90 = max(summary, key=lambda a: (a["ge90"], a["mean"]))
 
     cells: list[str] = []
 
@@ -365,110 +353,75 @@ def _format_abstract_cells(summary: list[dict[str, object]], n_no_pass: int) -> 
 
     cells.append(
         cell(
-            "Highest alpha (α)",
+            "Highest alpha",
             _esc(by_alpha["label"]),
-            f"{_pct(float(by_alpha['alpha']))} · {by_alpha['wins']} / {by_alpha['n']} solved",
+            f"α {_pct(float(by_alpha['alpha']))}",
         )
     )
     cells.append(
         cell(
-            "Highest mean score",
-            _esc(by_mean["label"]),
-            f"{_pct(float(by_mean['mean']))} · {by_mean['ge90']} ≥ 90%",
+            "Most ≥ 90% tasks",
+            _esc(by_ge90["label"]),
+            f"{by_ge90['ge90']} of {by_ge90['n']} at ≥ 90%",
         )
     )
-    if best_per_win is not None:
-        per_win = float(best_per_win["cost"]) / int(best_per_win["wins"])
-        cells.append(
-            cell(
-                "Best $ per win",
-                _esc(best_per_win["label"]),
-                f"${float(best_per_win['cost']):.2f} ÷ {best_per_win['wins']} wins = "
-                f"${per_win:.2f}/win",
-            )
-        )
-    else:
-        cells.append(cell("Best $ per win", "—", "no priced wins"))
     cells.append(
         cell(
             "Tasks no agent passed",
             str(n_no_pass),
-            f"of {summary[0]['n'] if summary else 0} — the ceiling of the suite",
+            # n_no_pass is counted over the union of all task_ids; the
+            # denominator must be that same distinct task count, not the first
+            # agent's task count (agents can run different subsets).
+            f"of {n_tasks} unsolved",
         )
     )
     return "".join(cells)
 
 
 def _format_lede(summary: list[dict[str, object]], n_tasks: int) -> str:
-    """Two-sentence lede: alpha leader first, mean-score leader second."""
-    by_alpha = max(summary, key=lambda a: (a["alpha"], a["wins"]))
-    by_mean = max(summary, key=lambda a: a["mean"])
-    n_agents = len(summary)
+    """One-sentence lede: alpha leader."""
+    by_alpha = max(summary, key=_rank_key)
     alpha_tone = by_alpha["short_id"]
-    mean_tone = by_mean["short_id"]
-    alpha_pct = _pct(float(by_alpha["alpha"]))
     return (
-        f"{_word_count(n_agents).capitalize()} coding agents ran HEIST's "
-        f"{_word_count(n_tasks)}-task frontier suite. Each task pairs the agent "
-        "with a multi-file repository, a public function contract, and a hidden "
-        "integration grader. Success means every hidden check passed — a score of "
-        "at least 0.999. "
-        f'<em class="tone-{alpha_tone}">{_esc(by_alpha["label"])}</em> leads on '
-        f"alpha (α) at {alpha_pct}, with {by_alpha['wins']} of {by_alpha['n']} tasks "
-        "fully passed. "
-        f'<em class="tone-{mean_tone}">{_esc(by_mean["label"])}</em> has the highest '
-        f"mean score at {_pct(float(by_mean['mean']))}."
+        f"{n_tasks} tasks. Each task is a real multi-file repo with a hidden grader. "
+        f'<em class="tone-{alpha_tone}">{_esc(by_alpha["label"])}</em> leads on alpha, '
+        f"α {_pct(float(by_alpha['alpha']))}."
     )
 
 
 def _format_narrative_blocks(summary: list[dict[str, object]]) -> str:
-    """One <div class="observation"> per agent, ranked by alpha (α), with auto-derived facts."""
-    ranked = sorted(summary, key=lambda a: (a["alpha"], a["wins"]), reverse=True)
-    # Identify rank-based callouts.
-    max_cost = max((a["cost"] for a in summary if a["cost"] > 0), default=0.0)
-    # "Fastest" uses success-only mean so a model that gives up quickly on hard
-    # tasks doesn't get crowned the speed leader. Award it to the exact argmin
-    # agent (mirroring best_per_win_id) rather than a float tolerance, so two
-    # near-tied agents can't both be crowned.
-    lat_eligible = [a for a in summary if a["lat_success_median"] > 0]
-    fastest_lat_id = (
-        min(lat_eligible, key=lambda a: a["lat_success_median"])["agent_id"]
-        if lat_eligible
-        else None
+    """One <div class="observation"> per agent, ranked by solve-rate, with auto-derived facts."""
+    ranked = sorted(summary, key=_rank_key, reverse=True)
+    # Identify rank-based callouts. "Fastest" uses success-only median latency so
+    # a model that gives up quickly on hard tasks doesn't get crowned the speed
+    # leader; it is stated as a relative claim, no absolute time shown.
+    min_lat = min(
+        (a["lat_success_median"] for a in summary if a["lat_success_median"] > 0),
+        default=0.0,
     )
     max_wins = max(a["wins"] for a in summary)
-    eligible = [a for a in summary if a["wins"] > 0 and a["cost"] > 0]
-    best_per_win_id = (
-        min(eligible, key=lambda a: a["cost"] / a["wins"])["agent_id"] if eligible else None
-    )
+    max_alpha = max(float(a["alpha"]) for a in summary)
 
     blocks: list[str] = []
     for a in ranked:
         tone = a["short_id"]
         tone_class = f" {tone}-tone" if tone in _AGENT_TIER else ""
         callouts: list[str] = []
+        if abs(float(a["alpha"]) - max_alpha) < 1e-9:
+            callouts.append("alpha leader")
         if a["wins"] == max_wins:
-            callouts.append(f"Most clean passes of the {_word_count(len(summary))}")
-        if max_cost > 0 and float(a["cost"]) == max_cost:
-            callouts.append(f"Most expensive run at ${float(a['cost']):.2f}")
-        if a["agent_id"] == fastest_lat_id:
-            callouts.append("Fastest agent on median passing-task latency")
-        if a["agent_id"] == best_per_win_id and int(a["wins"]) > 0:
-            per_win = float(a["cost"]) / int(a["wins"])
-            callouts.append(f"Best $/win at ${per_win:.2f}")
+            callouts.append("Most solved")
+        # Crown only the strict minimum (float-equality epsilon, like the alpha
+        # leader above) — a tolerance band would let several near-ties all claim
+        # "Fastest".
+        if min_lat > 0 and abs(float(a["lat_success_median"]) - min_lat) < 1e-9:
+            callouts.append("Fastest on passing tasks")
 
         base = (
-            f"{a['wins']} clean passes, mean {_pct(float(a['mean']))}. {a['ge90']} tasks at ≥ 90%."
+            f"α {_pct(float(a['alpha']))} · mean {_pct(float(a['mean']))} · "
+            f"{a['wins']}/{a['n']} solved · {a['ge90']} at ≥ 90%."
         )
-        if a["cost"] > 0:
-            base += f" ${float(a['cost']):.2f} total"
-            if a["wins"] > 0:
-                per_win = float(a["cost"]) / int(a["wins"])
-                base += f", ${per_win:.2f} per win"
-            base += "."
-            if a["cost_est"]:
-                base += " <span class='unit'>(reconstructed)</span>"
-        callout_str = (" " + " ".join(c + "." for c in callouts)) if callouts else ""
+        callout_str = (" " + " · ".join(callouts)) if callouts else ""
         blocks.append(
             f'<div class="observation{tone_class}">'
             f"<h4>{_esc(_short_agent_label(str(a['label'])))}</h4>"
@@ -486,7 +439,7 @@ def _build_run_json(
 ) -> str:
     """Serialize window.RUN — agents/pairs/tasks/global — exactly as the editorial JS expects."""
     agents_data = []
-    rank_order = sorted(summary, key=lambda a: (a["alpha"], a["wins"]), reverse=True)
+    rank_order = sorted(summary, key=_rank_key, reverse=True)
     for a in rank_order:
         entry = {
             "id": a["short_id"],
@@ -494,12 +447,12 @@ def _build_run_json(
             "tier": a["tier"],
             "n": a["n"],
             "wins": a["wins"],
-            # Headline metric: alpha (α), the difficulty-weighted mean score.
-            "alpha": round(float(a["alpha"]), 4),
-            # Secondary: success@0.999 solve-rate (wins / tasks).
+            # Secondary column: success@0.999 solve-rate (wins / tasks); the
+            # headline metric is alpha (α), below.
             "solve": round(_solve_rate(int(a["wins"]), int(a["n"])), 4),
             "ge90": a["ge90"],
             "mean": a["mean"],
+            "alpha": round(float(a["alpha"]), 4),
             "cost": round(float(a["cost"]), 4),
             # Speed signal: median latency on tasks that PASSED and completed
             # normally (excludes wall-clock-killed rows whose latency reflects
@@ -538,12 +491,8 @@ def _build_run_json(
     tasks = sorted(by_task)
     n_tasks = len(tasks)
     n_agents = len(summary)
-    # `rs` is non-empty in practice (by_task is built from results), but guard
-    # the empty case so it isn't vacuously counted as "all perfect". Note the
-    # `== 1.0` bar is stricter than a "win" (score >= 0.999): all_perfect counts
-    # only literally-perfect tasks.
-    all_perfect = sum(1 for rs in by_task.values() if rs and all(r.score == 1.0 for r in rs))
-    all_ge90 = sum(1 for rs in by_task.values() if rs and all(r.score >= 0.90 for r in rs))
+    all_perfect = sum(1 for rs in by_task.values() if all(r.score == 1.0 for r in rs))
+    all_ge90 = sum(1 for rs in by_task.values() if all(r.score >= 0.90 for r in rs))
 
     data = {
         "agents": agents_data,
@@ -686,14 +635,13 @@ def _render_empty_report(template: str) -> str:
     empty_substitutions = {
         "{{TITLE}}": "HEIST Run — No Results",
         "{{MAST_LEFT}}": "HEIST",
-        "{{RUN_DATE}}": datetime.now().strftime("%-d %b %Y"),
+        "{{RUN_DATE}}": _run_date_str(),
         "{{MAST_TITLE}}": "No results.<br>Run produced <em>no rows.</em>",
         "{{AGENT_LIST}}": "",
         "{{N_TASKS}}": "0",
         "{{N_TASKS_WORD}}": "0",
         "{{TASK_COUNT_LINE}}": "0 tasks graded",
         "{{CATEGORY_LINE}}": "",
-        "{{TOTAL_SPEND_LINE}}": "$0.00",
         "{{LEDE}}": "<p>No tasks completed in this run.</p>",
         "{{ABSTRACT_CELLS}}": "",
         "{{NARRATIVE_BLOCKS}}": "",
@@ -747,7 +695,6 @@ def render_html(
     tasks = sorted({r.task_id for r in results})
     n_tasks = len(tasks)
     total_cost = sum(float(a["cost"]) for a in summary)
-    any_est = any(a["cost_est"] for a in summary)
 
     # Tasks where no agent succeeded.
     by_task: dict[str, list[TaskRunResult]] = defaultdict(list)
@@ -755,31 +702,22 @@ def render_html(
         by_task[r.task_id].append(r)
     n_no_pass = sum(1 for rs in by_task.values() if not any(r.success for r in rs))
 
-    spend_suffix = " (incl. reconstructed)" if any_est else ""
-
     substitutions = {
-        "{{TITLE}}": _esc(
-            f"HEIST Frontier — {_word_count(n_agents).capitalize()}-Agent Evaluation"
-        ),
+        "{{TITLE}}": _esc(f"HEIST Frontier — {n_agents}-agent run"),
         "{{MAST_LEFT}}": "HEIST · Frontier Suite",
-        "{{RUN_DATE}}": datetime.now().strftime("%-d %b %Y"),
+        "{{RUN_DATE}}": _run_date_str(),
         "{{KIND_BADGE}}": _render_kind_badge(replay_source_run_id),
-        "{{MAST_TITLE}}": "HEIST",
+        "{{MAST_TITLE}}": "<em>HEIST</em>",
         "{{AGENT_LIST}}": " · ".join(
             _esc(_short_agent_label(str(a["label"])))
-            for a in sorted(
-                summary,
-                key=lambda a: (a["alpha"], a["wins"]),
-                reverse=True,
-            )
+            for a in sorted(summary, key=_rank_key, reverse=True)
         ),
         "{{N_TASKS}}": str(n_tasks),
-        "{{N_TASKS_WORD}}": _word_count(n_tasks),
+        "{{N_TASKS_WORD}}": str(n_tasks),
         "{{TASK_COUNT_LINE}}": f"{n_tasks} hidden-grader · multi-file",
         "{{CATEGORY_LINE}}": "Repo-debugging frontier",
-        "{{TOTAL_SPEND_LINE}}": f"${total_cost:.2f} across {n_agents} agents{spend_suffix}",
         "{{LEDE}}": _format_lede(summary, n_tasks),
-        "{{ABSTRACT_CELLS}}": _format_abstract_cells(summary, n_no_pass),
+        "{{ABSTRACT_CELLS}}": _format_abstract_cells(summary, n_no_pass, n_tasks),
         "{{NARRATIVE_BLOCKS}}": _format_narrative_blocks(summary),
         "{{BASELINE_SECTION}}": (
             _render_baseline_section(baseline_comparison) if baseline_comparison is not None else ""
@@ -794,30 +732,6 @@ def render_html(
     for token, value in substitutions.items():
         html = html.replace(token, value)
     return html
-
-
-_NUMBER_WORDS = {
-    1: "one",
-    2: "two",
-    3: "three",
-    4: "four",
-    5: "five",
-    6: "six",
-    7: "seven",
-    8: "eight",
-    9: "nine",
-    10: "ten",
-    12: "twelve",
-    15: "fifteen",
-    20: "twenty",
-    25: "twenty-five",
-    30: "thirty",
-}
-
-
-def _word_count(n: int) -> str:
-    """English word for small counts; fall back to digits otherwise."""
-    return _NUMBER_WORDS.get(n, str(n))
 
 
 def write_report(

@@ -163,18 +163,7 @@ def load_all_runs(
         except FileNotFoundError:
             results = []
         except Exception as exc:
-            # The manifest parsed but results.jsonl is unreadable/corrupt. Keep
-            # the scan resilient (one bad run must not break the whole listing),
-            # but log loudly at ERROR with the path — collapsing to an empty
-            # summary would otherwise be indistinguishable from a genuinely
-            # empty run, hiding real corruption in the corpus.
-            logger.error(
-                "corrupt results.jsonl for %s at %s: %s — summarising as empty, "
-                "row counts/scores for this run are unreliable",
-                manifest.run_id,
-                run_dir / "results.jsonl",
-                exc,
-            )
+            logger.warning("could not load results.jsonl for %s: %s", manifest.run_id, exc)
             results = []
         summaries.append(_summary_from_manifest(manifest, results))
     summaries.sort(key=lambda s: s.created_at, reverse=True)
@@ -254,6 +243,16 @@ class BaselineRegistry(BaseModel):
             if not isinstance(value, str):
                 raise HistoryError(
                     f"{path}: tag {key!r} maps to {type(value).__name__}, expected str"
+                )
+            if key in RESERVED_REFS:
+                raise HistoryError(
+                    f"{path}: tag {key!r} is reserved (resolves dynamically) and cannot "
+                    f"be a baseline tag"
+                )
+            if not _RUN_ID_RE.fullmatch(value):
+                raise HistoryError(
+                    f"{path}: tag {key!r} maps to invalid run id {value!r}: use only "
+                    f"letters, numbers, '.', '_', and '-'"
                 )
         return cls(entries=dict(raw))
 

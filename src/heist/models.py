@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 OutcomeStatus = Literal["graded", "errored"]
 RunStatus = Literal["in_progress", "completed", "aborted"]
@@ -164,6 +164,17 @@ class RunManifest(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
     duration_s: float | None = None
+
+    @field_validator("created_at", "completed_at")
+    @classmethod
+    def _ensure_aware_utc(cls, value: datetime | None) -> datetime | None:
+        # A hand-written or older manifest may carry a naive datetime; comparing
+        # naive vs aware raises TypeError and would crash `runs list`/compare on
+        # one bad manifest. Treat naive timestamps as UTC.
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+
     repo_root: str
     run_dir: str
     default_agents: list[str]

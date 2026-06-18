@@ -3,12 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from heist.export import export_eval_audit
 from heist.reporting import render_markdown, summarize_by_agent
 from heist.runner import load_results, run_benchmark
 from heist.tasks import select_tasks
 from tests.fixtures.marker import fake_agent, write_marker_task
+
+
+def test_export_eval_audit_rejects_empty_results(tmp_path: Path) -> None:
+    # An empty result set would write a schema-less parquet that downstream
+    # tooling rejects; export must fail loudly instead.
+    with pytest.raises(ValueError, match="no results to export"):
+        export_eval_audit(tmp_path, [])
 
 
 def test_report_marks_saturation(tmp_path: Path) -> None:
@@ -25,7 +33,6 @@ def test_report_marks_saturation(tmp_path: Path) -> None:
     )
     report = render_markdown(results)
     assert "SATURATED" in report
-    assert "| Agent | Task | Category | Score | Status | Time | Cost | Cost source |" in report
     assert load_results(Path(manifest.run_dir))[0].success is True
 
 
@@ -42,10 +49,12 @@ def test_report_uses_primary_cost(tmp_path: Path) -> None:
         run_id="report-cost-run",
     )
 
+    # Cost is no longer printed in the report, but the primary (reported) cost must
+    # still be the one selected at the data layer.
+    row = summarize_by_agent(results)[0]
+    assert row["total_cost"] == 1.23
     report = render_markdown(results)
-    assert "$1.2300" in report
-    assert "| Fake reported | `marker` | fake | 100.0% | pass |" in report
-    assert "| reported |" in report
+    assert "| Fake reported | `gpt-5.5` |" in report
 
 
 def test_report_score_chart_sorts_highest_left(tmp_path: Path) -> None:
@@ -63,9 +72,9 @@ def test_report_score_chart_sorts_highest_left(tmp_path: Path) -> None:
 
     report = render_markdown(results)
 
-    assert "## Alpha (α) Ranking" in report
+    assert "## alpha Ranking" in report
     assert "```text" in report
-    chart_start = report.index("## Alpha (α) Ranking")
+    chart_start = report.index("## alpha Ranking")
     chart_block = report[chart_start : report.index("## Hardness Gate", chart_start)]
     pass_idx = chart_block.index("Fake pass")
     fail_idx = chart_block.index("Fake fail")
@@ -102,11 +111,11 @@ def test_summary_splits_total_and_success_latency(tmp_path: Path) -> None:
     assert fail_row["success_latency"] == 0.0
     assert fail_row["median_success_latency"] == 0.0
 
+    # Latency is tracked in the metrics but is no longer printed in the report —
+    # the markdown summary intentionally omits cost and time columns.
     report = render_markdown(results)
-    assert "Time | Time (passed)" in report
-    # Agent with no successes renders n/a in the Time (passed) column.
-    fail_line = next(line for line in report.splitlines() if line.startswith("| Fake fail |"))
-    assert fail_line.endswith(" n/a |")
+    assert "Time" not in report
+    assert "Cost" not in report
 
 
 def test_eval_audit_export_writes_canonical_rows(tmp_path: Path) -> None:
@@ -187,29 +196,3 @@ def test_eval_audit_export_handles_multi_agent_multi_task_mixed_outcomes(
     # fake-reported writes total_cost_usd before the grader is even run, so
     # the cost should survive the errored grader.
     assert by_pair[("fake-reported", "marker-b")]["cost_source"] == "reported"
-
-
-def test_eval_audit_export_empty_results_writes_typed_columns(tmp_path: Path) -> None:
-    # A run with no results must still produce a typed, columned parquet — not a
-    # schemaless 0-column one that breaks a downstream `select(["cost_usd", ...])`.
-    write_marker_task(tmp_path)
-    tasks = select_tasks(suite="smoke", repo_root=tmp_path)
-    manifest, results = run_benchmark(
-        repo_root=tmp_path,
-        suite="smoke",
-        agents=[fake_agent("pass")],
-        tasks=tasks,
-        runs_dir=tmp_path / "runs",
-        timeout_s=5,
-        run_id="export-empty-run",
-    )
-    populated_cols = pl.read_parquet(export_eval_audit(Path(manifest.run_dir), results)).columns
-
-    empty_path = export_eval_audit(Path(manifest.run_dir), [])
-    empty = pl.read_parquet(empty_path)
-
-    assert empty.height == 0
-    # Same column set as a populated export — no schema drift, no missing columns.
-    assert empty.columns == populated_cols
-    # The scalar columns a downstream consumer selects are present and selectable.
-    assert empty.select(["cost_usd", "success", "outcome_status"]).height == 0

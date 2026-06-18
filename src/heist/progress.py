@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from rich.console import Console
@@ -161,12 +161,16 @@ class RichLiveReporter:
             self._live.update(self._render(), refresh=False)
 
     def _render(self) -> Table:
-        total = len(self._order)
-        done = sum(1 for key in self._order if self._states[key].finished_at is not None)
-        failed = sum(
-            1 for key in self._order if self._states[key].status in {"fail", "error", "timeout"}
-        )
-        running = sum(1 for key in self._order if self._states[key].status == "running")
+        # Snapshot under the lock so a worker thread mutating a _JobState mid-render
+        # can't produce a torn row (e.g. status updated but score not yet). Shallow
+        # copies are enough — every mutated field is a scalar.
+        with self._lock:
+            states = [replace(self._states[key]) for key in self._order]
+
+        total = len(states)
+        done = sum(1 for s in states if s.finished_at is not None)
+        failed = sum(1 for s in states if s.status in {"fail", "error", "timeout"})
+        running = sum(1 for s in states if s.status == "running")
         elapsed = time.monotonic() - self._started_at
         eta = self._estimate_eta(done, total, elapsed)
 
@@ -184,8 +188,7 @@ class RichLiveReporter:
         table.add_column("Cost", justify="right", width=10)
 
         now = time.monotonic()
-        for key in self._order:
-            state = self._states[key]
+        for state in states:
             elapsed_text = self._elapsed_text(state, now)
             table.add_row(
                 state.agent.id,

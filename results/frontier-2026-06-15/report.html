@@ -36,6 +36,7 @@
     /* Per-agent hues — modern, distinct on white. <id> + <id>-2 (deep). */
     --opus:   #d97757; --opus-2: #b1502f;
     --codex:  #10a37f; --codex-2:#0b7a5f;
+    --codexmini: #c2710c; --codexmini-2:#9a5a0a;
     --sonnet: #7c3aed; --sonnet-2:#5b21b6;
     --haiku:  #e8950c; --haiku-2:#b45309;
     --composer:#2563eb; --composer-2:#1d4ed8;
@@ -103,7 +104,7 @@
   .abstract{ display:grid; grid-template-columns:1.55fr 1fr; gap:56px; align-items:start; }
   .lede{ font-size:23px; line-height:1.5; font-weight:360; color:var(--ink-2); margin:0; letter-spacing:-0.018em; }
   .lede em{ font-style:normal; font-weight:600; color:var(--ink); }
-  .lede em.tone-opus,.lede em.tone-composer,.lede em.tone-codex,.lede em.tone-sonnet,
+  .lede em.tone-opus,.lede em.tone-composer,.lede em.tone-codex,.lede em.tone-codexmini,.lede em.tone-sonnet,
   .lede em.tone-haiku,.lede em.tone-gemini,.lede em.tone-kimi,.lede em.tone-grok{ font-weight:640; }
   .abstract-stats{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
   .abstract-stats .cell{ background:var(--surface); border:1px solid var(--rule); border-radius:var(--radius-sm); padding:20px; box-shadow:var(--shadow-sm); }
@@ -114,6 +115,7 @@
   /* swatches + tones (generic; per-agent fills below) */
   .swatch{ width:11px; height:11px; border-radius:3px; flex-shrink:0; display:inline-block; background:var(--ink-3); }
   .swatch.opus{background:var(--opus)} .swatch.codex{background:var(--codex)}
+  .swatch.codexmini{background:var(--codexmini)}
   .swatch.composer{background:var(--composer)} .swatch.sonnet{background:var(--sonnet)}
   .swatch.haiku{background:var(--haiku)} .swatch.gemini{background:var(--gemini)}
   .swatch.kimi{background:var(--kimi)} .swatch.grok{background:var(--grok)}
@@ -122,6 +124,7 @@
   .swatch.openrouter-kimi{background:var(--openrouter-kimi)}
   .swatch.openrouter-qwen{background:var(--openrouter-qwen)}
   .tone-opus{color:var(--opus-2)} .tone-codex{color:var(--codex-2)}
+  .tone-codexmini{color:var(--codexmini-2)}
   .tone-composer{color:var(--composer-2)} .tone-sonnet{color:var(--sonnet-2)}
   .tone-haiku{color:var(--haiku-2)} .tone-gemini{color:var(--gemini-2)}
   .tone-kimi{color:var(--kimi-2)} .tone-grok{color:var(--grok-2)}
@@ -143,6 +146,7 @@
   .big-mean{ font-size:44px; line-height:1; letter-spacing:-0.045em; margin:8px 0 0; font-weight:680; color:var(--ink); }
   .col.opus-col .big-mean, .col.opus-col .agent-name em{color:var(--opus)}
   .col.codex-col .big-mean, .col.codex-col .agent-name em{color:var(--codex)}
+  .col.codexmini-col .big-mean, .col.codexmini-col .agent-name em{color:var(--codexmini)}
   .col.composer-col .big-mean, .col.composer-col .agent-name em{color:var(--composer)}
   .col.sonnet-col .big-mean, .col.sonnet-col .agent-name em{color:var(--sonnet)}
   .col.haiku-col .big-mean, .col.haiku-col .agent-name em{color:var(--haiku-2)}
@@ -187,6 +191,7 @@
   .score-bar-name{ text-align:center; padding-top:12px; font-weight:600; font-size:11px; letter-spacing:-0.015em; line-height:1.25; }
   .score-bar-rank{ display:block; font-family:"JetBrains Mono",monospace; font-size:9.5px; color:var(--ink-3); font-weight:400; margin-top:3px; }
   .score-bar.opus{--bar-color:var(--opus)} .score-bar.codex{--bar-color:var(--codex)}
+  .score-bar.codexmini{--bar-color:var(--codexmini)}
   .score-bar.composer{--bar-color:var(--composer)} .score-bar.sonnet{--bar-color:var(--sonnet)}
   .score-bar.haiku{--bar-color:var(--haiku-2)} .score-bar.gemini{--bar-color:var(--gemini)}
   .score-bar.kimi{--bar-color:var(--kimi)} .score-bar.grok{--bar-color:var(--grok)}
@@ -227,6 +232,7 @@
   table.full-results td.num.leader{ font-weight:600; }
   table.full-results td.num.opus-col.leader{color:var(--opus-2)}
   table.full-results td.num.codex-col.leader{color:var(--codex-2)}
+  table.full-results td.num.codexmini-col.leader{color:var(--codexmini-2)}
   table.full-results td.num.composer-col.leader{color:var(--composer-2)}
   table.full-results td.num.sonnet-col.leader{color:var(--sonnet-2)}
   table.full-results td.num.haiku-col.leader{color:var(--haiku-2)}
@@ -302,6 +308,7 @@
   .observation{ border:1px solid var(--rule); border-left:3px solid var(--opus); border-radius:var(--radius-sm); padding:18px 20px; box-shadow:var(--shadow-sm); }
   .observation.composer-tone{border-left-color:var(--composer)}
   .observation.codex-tone{border-left-color:var(--codex)}
+  .observation.codexmini-tone{border-left-color:var(--codexmini)}
   .observation.sonnet-tone{border-left-color:var(--sonnet)}
   .observation.gemini-tone{border-left-color:var(--gemini)}
   .observation.haiku-tone{border-left-color:var(--haiku)}
@@ -394,7 +401,7 @@
       <div class="mast-mid">Evaluation Report</div>
       <div class="mast-right">2026 · 06 · 15</div>
     </div>
-    <h1 class="mast-title">HEIST</h1>
+    <h1 class="mast-title">Frontier Benchmark</h1>
     <div class="mast-sub">
       <div><span class="k">Agents evaluated</span><span class="v">10</span></div>
       <div><span class="k">Tasks per agent</span><span class="v">30</span></div>

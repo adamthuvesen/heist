@@ -7,11 +7,8 @@ alpha is the difficulty-weighted mean of per-task scores:
 with tier weights {1 (hard): 3.0, 2 (medium): 1.0, 3 (easy): 0.5}. Tasks that
 declare no tier default to medium.
 
-This module is deliberately GENERIC: it holds the weight table and the
-weighting maths only — it carries NO mapping of task names to tiers. The
-held-out tier assignments are test-set identity and never ship in the public
-repo. Public tasks therefore declare no tier, so every weight defaults to
-medium and alpha equals the plain mean score. That is correct and intended.
+This module is deliberately generic: it holds the weight table and weighting
+math only. It carries no mapping of held-out task names to tiers.
 """
 
 from __future__ import annotations

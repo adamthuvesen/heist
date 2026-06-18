@@ -12,7 +12,6 @@ treats it as just another run for `list`, `compare`, and `history`.
 
 from __future__ import annotations
 
-import logging
 import re
 import shutil
 import threading
@@ -32,8 +31,6 @@ from heist.runner import (
 # on that prefix lets `SnapshotExecutor` propagate the same terminal outcome by
 # re-raising `MissingAgentEnv` — no per-error type code in the runner.
 _MISSING_ENV_RE = re.compile(r"agent '(?P<agent_id>[^']+)' requires env vars: (?P<vars>.+)")
-
-logger = logging.getLogger("heist.replay")
 
 
 class ReplayOfReplayError(RuntimeError):
@@ -105,7 +102,25 @@ class SnapshotExecutor:
     # Executor protocol
     # ------------------------------------------------------------------
 
+    def _terminal_missing_env(self, agent_id: str, task_id: str) -> MissingAgentEnv | None:
+        """Reconstruct a MissingAgentEnv abort from a source row, if it recorded
+        one. Such rows have no workspace (the live run now aborts before the
+        workspace copy), so this must be detected before the source-workspace
+        check — otherwise replay reports 'source workspace missing' instead of
+        reproducing the original env error."""
+        row = self._rows_by_pair.get((agent_id, task_id))
+        if row is None or row.outcome_status != "errored" or not row.error:
+            return None
+        match = _MISSING_ENV_RE.match(row.error)
+        if match is None:
+            return None
+        missing = [v.strip() for v in match.group("vars").split(",")]
+        return MissingAgentEnv(match.group("agent_id"), missing)
+
     def prepare_workspace(self, *, agent: AgentSpec, task: TaskDefinition, workspace: Path) -> None:
+        abort = self._terminal_missing_env(agent.id, task.id)
+        if abort is not None:
+            raise abort
         source_ws = self._source_workspace(agent.id, task.id)
         if not source_ws.exists():
             raise ReplaySourceMissing(
@@ -137,24 +152,22 @@ class SnapshotExecutor:
                 f"source row missing for {pair} in {self.source_run_dir / 'results.jsonl'}"
             )
 
-        # Faithful terminal-outcome preservation:
-        # - missing-env errors must re-raise so `_run_benchmark_job`'s existing
-        #   MissingAgentEnv branch produces the same error string/outcome.
-        if row.outcome_status == "errored" and row.error:
-            match = _MISSING_ENV_RE.match(row.error)
-            if match:
-                missing = [v.strip() for v in match.group("vars").split(",")]
-                raise MissingAgentEnv(match.group("agent_id"), missing)
+        # Faithful terminal-outcome preservation: missing-env errors re-raise so
+        # `_run_benchmark_job`'s MissingAgentEnv branch produces the same outcome.
+        # Normally caught earlier in prepare_workspace; kept here as a fallback.
+        abort = self._terminal_missing_env(agent.id, task.id)
+        if abort is not None:
+            raise abort
 
         artifact_dir.mkdir(parents=True, exist_ok=True)
         stdout_dest = artifact_dir / "stdout.txt"
         stderr_dest = artifact_dir / "stderr.txt"
-        source_stdout = Path(row.stdout_path)
-        source_stderr = Path(row.stderr_path)
-        if not source_stdout.exists():
-            raise ReplaySourceMissing(f"captured stdout missing for {pair}: {source_stdout}")
-        if not source_stderr.exists():
-            raise ReplaySourceMissing(f"captured stderr missing for {pair}: {source_stderr}")
+        source_stdout = self._confined_source(row.stdout_path)
+        source_stderr = self._confined_source(row.stderr_path)
+        if source_stdout is None or not source_stdout.exists():
+            raise ReplaySourceMissing(f"captured stdout missing for {pair}: {row.stdout_path}")
+        if source_stderr is None or not source_stderr.exists():
+            raise ReplaySourceMissing(f"captured stderr missing for {pair}: {row.stderr_path}")
         shutil.copy2(source_stdout, stdout_dest)
         shutil.copy2(source_stderr, stderr_dest)
 
@@ -191,22 +204,13 @@ class SnapshotExecutor:
         # diff capture (matches LiveExecutor's failure semantics).
         row = self._rows_by_pair.get((agent.id, task.id))
         if row is not None:
-            source_diff = Path(row.diff_path)
-            if source_diff.exists():
+            source_diff = self._confined_source(row.diff_path)
+            if source_diff is not None and source_diff.exists():
                 try:
                     diff_path.write_bytes(source_diff.read_bytes())
                     return
-                except OSError as exc:
-                    # Never raise from diff capture, but don't silently swallow
-                    # the cause: an infra failure (permissions, ENOSPC) would
-                    # otherwise be indistinguishable from a genuinely missing
-                    # source diff once it reaches the marker below.
-                    logger.warning(
-                        "replay: could not copy source diff %s -> %s: %s",
-                        source_diff,
-                        diff_path,
-                        exc,
-                    )
+                except OSError:
+                    pass
         diff_path.write_text("<error: replay source diff missing>\n")
 
     # ------------------------------------------------------------------
@@ -215,6 +219,18 @@ class SnapshotExecutor:
 
     def _source_workspace(self, agent_id: str, task_id: str) -> Path:
         return self.source_run_dir / "workspaces" / _safe_agent(agent_id) / task_id
+
+    def _confined_source(self, recorded: str) -> Path | None:
+        """Resolve a path recorded in results.jsonl, confined to the source run
+        dir. A tampered/hand-edited run file could point stdout/stderr/diff paths
+        at any file on disk; an escaping path is treated as missing rather than
+        copied out of the run tree."""
+        root = self.source_run_dir.resolve()
+        candidate = Path(recorded)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved = candidate.resolve()
+        return resolved if resolved.is_relative_to(root) else None
 
     # ------------------------------------------------------------------
     # Selection helpers used by the CLI

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,18 @@ def main() -> None:
     if mode == "delayed_pass":
         time.sleep(0.3)
         Path("answer.txt").write_text("yes\n")
+    elif mode == "ignore_sigterm":
+        # Trap SIGTERM and keep running, like an agent CLI that doesn't shut
+        # down on the harness's first signal. The runner must escalate to
+        # SIGKILL rather than wait out the long sleep.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        Path("answer.txt").write_text("yes\n")
+        time.sleep(30)
+    elif mode == "signal_death":
+        # Die from a signal (returncode -15) so the runner's exit-code path
+        # reports "killed by signal", not a bogus numeric exit code.
+        Path("answer.txt").write_text("yes\n")
+        os.kill(os.getpid(), signal.SIGTERM)
     elif mode in {"pass", "reported", "slow_usage", "exit_nonzero"}:
         Path("answer.txt").write_text("yes\n")
     elif mode == "fail":
@@ -20,6 +33,14 @@ def main() -> None:
         # transcript references the hidden path (injected via HEIST_CHEAT_ECHO).
         Path("answer.txt").write_text("yes\n")
         print(os.environ.get("HEIST_CHEAT_ECHO", ""))
+    elif mode == "writes_cache":
+        # Mimic the opencode CLI filling its XDG dirs (uv archives, snapshots,
+        # logs) under .agent_home. The runner must delete that dir after the
+        # run so it doesn't accumulate on disk across (agent, task) pairs.
+        Path("answer.txt").write_text("yes\n")
+        cache_home = Path(os.environ["XDG_CACHE_HOME"])
+        cache_home.mkdir(parents=True, exist_ok=True)
+        (cache_home / "bloat.bin").write_bytes(b"x" * 4096)
     elif mode == "sleep":
         time.sleep(10)
     elif mode in {"stderr_only", "multiline_stream"}:

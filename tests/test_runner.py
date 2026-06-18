@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from heist.agents import DEFAULT_AGENTS
 from heist.models import AgentSpec
 from heist.runner import (
     _ordered_jobs,
@@ -171,6 +173,29 @@ def test_regrade_run_rejects_rows_for_missing_current_tasks(tmp_path: Path) -> N
         regrade_run(run_dir, tasks)
 
 
+def test_regrade_run_preserves_rows_with_missing_workspace(tmp_path: Path) -> None:
+    write_marker_task(tmp_path, "marker")
+    tasks = select_tasks(suite="smoke", repo_root=tmp_path)
+    # An errored row whose workspace was never created (default workspace_path
+    # points at a nonexistent /tmp path).
+    errored = make_result(
+        run_id="env-fail",
+        task_id="marker",
+        outcome_status="errored",
+        success=None,
+        score=0.0,
+    ).model_copy(update={"error": "agent 'fake' requires env vars: OPENROUTER_API_KEY"})
+    run_dir = write_synthetic_run(tmp_path / "runs", "env-fail", results=[errored])
+
+    [regraded] = regrade_run(run_dir, tasks)
+
+    # The original failure is carried forward, not silently rewritten to graded.
+    assert regraded.outcome_status == "errored"
+    assert regraded.success is None
+    assert regraded.score == 0.0
+    assert regraded.error == "agent 'fake' requires env vars: OPENROUTER_API_KEY"
+
+
 def test_run_benchmark_records_timeout_as_errored(tmp_path: Path) -> None:
     write_marker_task(tmp_path)
     tasks = select_tasks(suite="smoke", repo_root=tmp_path)
@@ -213,6 +238,49 @@ def test_run_benchmark_records_nonzero_agent_exit_as_errored(tmp_path: Path) -> 
     assert result.score == 0.0
     assert result.agent_exit_code == 2
     assert result.error == "agent exited with code 2"
+
+
+def test_run_benchmark_reports_signal_death_as_killed_by_signal(tmp_path: Path) -> None:
+    write_marker_task(tmp_path)
+    tasks = select_tasks(suite="smoke", repo_root=tmp_path)
+    _, results = run_benchmark(
+        repo_root=tmp_path,
+        suite="smoke",
+        agents=[fake_agent("signal_death")],
+        tasks=tasks,
+        runs_dir=tmp_path / "runs",
+        timeout_s=5,
+        run_id="signal-run",
+    )
+
+    [result] = results
+    assert result.outcome_status == "errored"
+    assert result.timed_out is False
+    # Negative returncode (-15) must be reported as a signal kill, not "code -15".
+    assert result.error == "agent killed by signal 15"
+
+
+def test_run_benchmark_kills_sigterm_ignoring_agent(tmp_path: Path) -> None:
+    write_marker_task(tmp_path)
+    tasks = select_tasks(suite="smoke", repo_root=tmp_path)
+    start = time.monotonic()
+    _, results = run_benchmark(
+        repo_root=tmp_path,
+        suite="smoke",
+        agents=[fake_agent("ignore_sigterm")],
+        tasks=tasks,
+        runs_dir=tmp_path / "runs",
+        timeout_s=1,
+        run_id="sigterm-ignore-run",
+    )
+    elapsed = time.monotonic() - start
+
+    [result] = results
+    assert result.timed_out is True
+    assert result.outcome_status == "errored"
+    # The agent's own sleep is 30s; if escalation to SIGKILL works it dies within
+    # the timeout + grace + reap window, well under that.
+    assert elapsed < 20
 
 
 def test_write_diff_failure_produces_errored_row(
@@ -456,6 +524,97 @@ def test_honest_run_is_not_flagged(tmp_path: Path) -> None:
     )
     assert results[0].cheating_detected is False
     assert results[0].success is True
+
+
+def test_execute_agent_isolates_opencode_xdg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The selected agent declares required_env=['OPENROUTER_API_KEY']; without it
+    # execute_agent raises MissingAgentEnv before reaching the patched call.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    write_marker_task(tmp_path)
+    task = load_tasks("smoke", repo_root=tmp_path)[0]
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    artifact_dir = tmp_path / "art"
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], *, env: dict[str, str], **kwargs: object) -> SubprocessResult:
+        captured["env"] = env
+        captured["command"] = command
+        return SubprocessResult(stdout=b"", stderr=b"", returncode=0, timed_out=False)
+
+    monkeypatch.setattr("heist.runner.run_subprocess_safely", fake_run)
+    agent = DEFAULT_AGENTS["openrouter-deepseek-v4-pro"]
+    execute_agent(agent, task, workspace, artifact_dir, timeout_s=5)
+    agent_home = artifact_dir / ".agent_home"
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["XDG_DATA_HOME"] == str(agent_home / "xdg-data")
+    assert env["XDG_CACHE_HOME"] == str(agent_home / "xdg-cache")
+    assert env["XDG_STATE_HOME"] == str(agent_home / "xdg-state")
+    assert env["HEIST_WORKSPACE"] == str(workspace.resolve())
+    command = captured["command"]
+    assert isinstance(command, list)
+    dir_index = command.index("--dir")
+    assert command[dir_index + 1] == str(workspace.resolve())
+
+
+def test_run_benchmark_removes_agent_home_but_keeps_artifacts(tmp_path: Path) -> None:
+    # The opencode/openrouter agents wire XDG dirs into .agent_home, which the
+    # CLI fills with uv archives, snapshots, and logs (hundreds of MB per pair).
+    # After the run the harness must delete .agent_home while preserving every
+    # real artifact (stdout/stderr/diff/grader/results).
+    write_marker_task(tmp_path)
+    tasks = select_tasks(suite="smoke", repo_root=tmp_path)
+    agent = AgentSpec(
+        id="fake-writes_cache",
+        label="Fake writes_cache",
+        provider="fake",
+        model_id="fake-model",
+        command=[sys.executable, str(FAKE_AGENT_SCRIPT), "writes_cache"],
+        env_overrides={"XDG_CACHE_HOME": "{agent_home}/xdg-cache"},
+    )
+    manifest, results = run_benchmark(
+        repo_root=tmp_path,
+        suite="smoke",
+        agents=[agent],
+        tasks=tasks,
+        runs_dir=tmp_path / "runs",
+        timeout_s=5,
+        run_id="cleanup-run",
+        jobs=1,
+    )
+
+    assert results[0].success is True
+    run_dir = Path(manifest.run_dir)
+    artifact_dir = run_dir / "artifacts" / "fake-writes_cache" / tasks[0].id
+    assert not (artifact_dir / ".agent_home").exists()
+    assert (artifact_dir / "stdout.txt").exists()
+    assert (artifact_dir / "stderr.txt").exists()
+    assert (artifact_dir / "diff.patch").exists()
+    assert (artifact_dir / "grader.json").exists()
+    assert (run_dir / "results.jsonl").exists()
+
+
+def test_execute_agent_removes_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unit-level guard on the cleanup itself: a file seeded under .agent_home
+    # before the subprocess "runs" must be gone once execute_agent returns.
+    write_marker_task(tmp_path)
+    task = load_tasks("smoke", repo_root=tmp_path)[0]
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    artifact_dir = tmp_path / "art"
+
+    def fake_run(command: list[str], **kwargs: object) -> SubprocessResult:
+        bloat = artifact_dir / ".agent_home" / "xdg-cache" / "bloat.bin"
+        bloat.parent.mkdir(parents=True, exist_ok=True)
+        bloat.write_bytes(b"x" * 4096)
+        return SubprocessResult(stdout=b"", stderr=b"", returncode=0, timed_out=False)
+
+    monkeypatch.setattr("heist.runner.run_subprocess_safely", fake_run)
+    execute_agent(fake_agent("pass"), task, workspace, artifact_dir, timeout_s=5)
+    assert not (artifact_dir / ".agent_home").exists()
 
 
 def test_execute_agent_wraps_command_in_sandbox(

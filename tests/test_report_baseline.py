@@ -32,6 +32,23 @@ def test_render_html_baseline_section_absent_by_default(tmp_path: Path) -> None:
     assert "{{BASELINE_SECTION}}" not in html
 
 
+def test_render_html_unsolved_denominator_is_distinct_task_count() -> None:
+    # Two agents over different task subsets: 'aaa' ran 2 tasks, 'bbb' ran 3.
+    # The "unsolved" denominator must be the 3 distinct tasks, not the first
+    # agent's task count (2).
+    results = [
+        make_result(run_id="r", agent_id="aaa", task_id="t1", score=1.0, success=True),
+        make_result(run_id="r", agent_id="aaa", task_id="t2", score=1.0, success=True),
+        make_result(run_id="r", agent_id="bbb", task_id="t1", score=1.0, success=True),
+        make_result(run_id="r", agent_id="bbb", task_id="t2", score=1.0, success=True),
+        make_result(run_id="r", agent_id="bbb", task_id="t3", score=0.0, success=False),
+    ]
+    html = render_html(results)
+    # t3 is solved by nobody → 1 unsolved of the 3 distinct tasks.
+    assert "of 3 unsolved" in html
+    assert "of 2 unsolved" not in html
+
+
 def test_render_html_baseline_section_renders_when_supplied(tmp_path: Path) -> None:
     write_two_runs(tmp_path)
     report = compare(tmp_path, "run-a", "run-b")

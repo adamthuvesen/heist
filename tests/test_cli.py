@@ -88,11 +88,11 @@ def test_report_command_prints_summary(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     # Header alone isn't enough — a regression that renders the header but
-    # drops the results table would still pass. Assert the agent label and
-    # the task id appear so the body is genuinely populated.
+    # drops the body would still pass. Assert the agent label and the alpha
+    # ranking chart appear so the body is genuinely populated.
     assert "HEIST Run Report" in result.output
     assert "Fake pass" in result.output
-    assert "marker" in result.output
+    assert "## alpha Ranking" in result.output
 
 
 def test_suites_list_command_includes_smoke(tmp_path: Path) -> None:
@@ -112,7 +112,7 @@ def test_agents_list_command_lists_default_registry(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     # Rich's table renderer may wrap or truncate the rendered cells, so match
     # on substrings that always survive (model ids, not the agent id chrome).
-    assert "claude-opus-4-7" in result.output
+    assert "claude-opus-4-8" in result.output
     assert "gpt-5.5" in result.output
 
 

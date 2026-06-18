@@ -53,6 +53,8 @@ def _int_value(value: object) -> int:
     # counts through as strings (especially when proxying SSE-to-JSON); silently
     # zeroing those out would corrupt cost reconstruction. Negative values are
     # clamped to 0 — defensive against buggy providers reporting credits.
+    # Token counts are integral in practice; round() (round-half-to-even) only
+    # matters for the fractional inputs that providers don't actually emit.
     if isinstance(value, bool):
         return 0
     if isinstance(value, int):
@@ -90,10 +92,6 @@ def _float_value(value: object) -> float | None:
     return None
 
 
-def _path(path: tuple[str, ...]) -> str:
-    return ".".join(path)
-
-
 def _model_usage_costs(value: object) -> Iterator[tuple[float, str]]:
     if not isinstance(value, dict):
         return
@@ -105,29 +103,53 @@ def _model_usage_costs(value: object) -> Iterator[tuple[float, str]]:
             yield cost, f"modelUsage.{model_id}.costUSD"
 
 
-def _reported_costs(value: object, path: tuple[str, ...] = ()) -> Iterator[tuple[int, float, str]]:
-    if isinstance(value, dict):
-        model_usage = value.get("modelUsage")
-        if model_usage is not None:
-            total = 0.0
-            sources: list[str] = []
-            for cost, source in _model_usage_costs(model_usage):
-                total += cost
-                sources.append(source)
-            if sources:
-                yield 1, total, "+".join(sources)
+# Cost priority tiers, lowest = most authoritative.
+_TIER_TOTAL = 0  # explicit session total (total_cost_usd) — cumulative
+_TIER_MODEL_USAGE = 1  # sum of per-model costUSD — per-turn
+_TIER_BARE_COST = 2  # a bare cost_usd / cost key — per-turn
 
-        for key, child in value.items():
-            child_path = (*path, str(key))
-            cost = _float_value(child)
-            if cost is not None and key in REPORTED_TOTAL_COST_KEYS:
-                yield 0, cost, _path(child_path)
-            elif cost is not None and key in REPORTED_COST_KEYS:
-                yield 2, cost, _path(child_path)
-            yield from _reported_costs(child, child_path)
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            yield from _reported_costs(child, (*path, str(index)))
+
+def _line_cost(payload: object) -> dict[int, tuple[float, str]]:
+    """Best reported cost per priority tier within a single JSON line.
+
+    Within one line the same value often appears at several nesting levels, so
+    repeats are deduped by taking the max per tier. The ``modelUsage`` subtree is
+    aggregated once at tier 1 and NOT descended into, so its inner ``costUSD``
+    values aren't also counted as tier-2 bare costs (which would double-count).
+    Iterative walk so a pathologically nested payload can't blow the stack.
+    """
+    tiers: dict[int, tuple[float, str]] = {}
+
+    def offer(tier: int, cost: float, source: str) -> None:
+        current = tiers.get(tier)
+        if current is None or cost > current[0]:
+            tiers[tier] = (cost, source)
+
+    stack: list[object] = [payload]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            model_usage = current.get("modelUsage")
+            if isinstance(model_usage, dict):
+                total = 0.0
+                sources: list[str] = []
+                for cost, source in _model_usage_costs(model_usage):
+                    total += cost
+                    sources.append(source)
+                if sources:
+                    offer(_TIER_MODEL_USAGE, total, "+".join(sources))
+            for key, child in current.items():
+                if key == "modelUsage":
+                    continue  # aggregated above; don't descend (avoids double-count)
+                cost = _float_value(child)
+                if cost is not None and key in REPORTED_TOTAL_COST_KEYS:
+                    offer(_TIER_TOTAL, cost, str(key))
+                elif cost is not None and key in REPORTED_COST_KEYS:
+                    offer(_TIER_BARE_COST, cost, str(key))
+                stack.append(child)
+        elif isinstance(current, list):
+            stack.extend(current)
+    return tiers
 
 
 def _per_line_usage(payload: object) -> tuple[int, int, int, int]:
@@ -148,13 +170,11 @@ def _per_line_usage(payload: object) -> tuple[int, int, int, int]:
     best_cache_read = 0
     best_cache_write = 0
     for obj in _objects(payload):
-        obj_input = max((_int_value(obj.get(key)) for key in INPUT_KEYS), default=0)
-        obj_output = max((_int_value(obj.get(key)) for key in OUTPUT_KEYS), default=0)
-        obj_cache_read = max((_int_value(obj.get(key)) for key in CACHE_READ_KEYS), default=0)
-        obj_cache_write = max((_int_value(obj.get(key)) for key in CACHE_WRITE_KEYS), default=0)
-        subset_cache = max(
-            (_int_value(obj.get(key)) for key in OPENAI_SUBSET_CACHE_KEYS), default=0
-        )
+        obj_input = max(0, *(_int_value(obj.get(key)) for key in INPUT_KEYS))
+        obj_output = max(0, *(_int_value(obj.get(key)) for key in OUTPUT_KEYS))
+        obj_cache_read = max(0, *(_int_value(obj.get(key)) for key in CACHE_READ_KEYS))
+        obj_cache_write = max(0, *(_int_value(obj.get(key)) for key in CACHE_WRITE_KEYS))
+        subset_cache = max(0, *(_int_value(obj.get(key)) for key in OPENAI_SUBSET_CACHE_KEYS))
         if subset_cache > 0 and obj_input >= subset_cache:
             obj_input -= subset_cache
         best_input = max(best_input, obj_input)
@@ -166,7 +186,15 @@ def _per_line_usage(payload: object) -> tuple[int, int, int, int]:
 
 def capture_usage(text: str) -> UsageCapture:
     usage = TokenUsage()
-    reported: tuple[int, float, str] | None = None
+    # Cost aggregation mirrors token aggregation (summed across lines) so a
+    # multi-turn session isn't under-counted. Tier 0 (explicit session total) is
+    # cumulative, so take its max across lines; tiers 1/2 (per-turn modelUsage /
+    # bare cost) are summed across lines. Tier 0 wins when present.
+    total_cost: float | None = None
+    total_source: str | None = None
+    per_turn_sum = 0.0
+    per_turn_tier: int | None = None
+    per_turn_source: str | None = None
     for line in text.splitlines():
         try:
             payload = json.loads(line)
@@ -177,32 +205,38 @@ def capture_usage(text: str) -> UsageCapture:
         usage.output += line_output
         usage.cache_read += line_cache_read
         usage.cache_write += line_cache_write
-        for candidate in _reported_costs(payload):
-            if reported is None:
-                reported = candidate
-                continue
-            priority, cost, _ = candidate
-            reported_priority, reported_cost, _ = reported
-            if priority < reported_priority or (
-                priority == reported_priority and cost > reported_cost
-            ):
-                reported = candidate
 
-    if reported is None:
-        return UsageCapture(usage=usage)
-    _, cost, source = reported
-    return UsageCapture(usage=usage, reported_cost_usd=cost, reported_cost_source=source)
+        tiers = _line_cost(payload)
+        if _TIER_TOTAL in tiers:
+            cost, source = tiers[_TIER_TOTAL]
+            if total_cost is None or cost > total_cost:
+                total_cost = cost
+                total_source = source
+        # Within a line prefer the modelUsage aggregate over a bare cost key —
+        # they describe the same spend two ways; counting both double-counts.
+        turn_tiers = [t for t in (_TIER_MODEL_USAGE, _TIER_BARE_COST) if t in tiers]
+        if turn_tiers:
+            tier = min(turn_tiers)
+            cost, source = tiers[tier]
+            per_turn_sum += cost
+            if per_turn_tier is None or tier < per_turn_tier:
+                per_turn_tier = tier
+                per_turn_source = source
+
+    if total_cost is not None:
+        return UsageCapture(
+            usage=usage, reported_cost_usd=total_cost, reported_cost_source=total_source
+        )
+    if per_turn_tier is not None:
+        return UsageCapture(
+            usage=usage, reported_cost_usd=per_turn_sum, reported_cost_source=per_turn_source
+        )
+    return UsageCapture(usage=usage)
 
 
 # (input, output, cache_read, cache_write) in USD per million tokens.
-# `input` and `cache_read` are treated as DISJOINT pools and priced separately
-# below — this is the load-bearing invariant for cost accuracy. It holds for
-# every provider here: Anthropic/cursor stream-json reports them as separate
-# fields, and OpenAI-style payloads (which fold cached tokens into the input
-# total) are normalised in `_per_line_usage` by subtracting OPENAI_SUBSET_CACHE_KEYS
-# from input before they reach here. A future provider that reports cache-read
-# tokens *inside* its input count under a non-OpenAI key would double-count;
-# test_cost_for_usage_* locks this invariant so that regression is caught.
+# `inputTokens` and `cacheReadTokens` are treated as disjoint pools, matching
+# cursor-agent's Anthropic-style stream-json field naming.
 #
 # PRICING_LAST_VERIFIED: 2026-06-14
 # Sources:

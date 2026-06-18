@@ -264,6 +264,44 @@ def test_replay_source_workspace_file_yields_errored_result(tmp_path: Path) -> N
     assert "source workspace is not a directory" in (replay_row.error or "")
 
 
+def test_replay_rejects_stdout_path_escaping_source_dir(tmp_path: Path) -> None:
+    import json as json_mod
+
+    live_dir, _ = _run_live(tmp_path, "live-escape")
+    tasks = select_tasks(suite="smoke", repo_root=tmp_path)
+    # A secret outside the run tree that a tampered run file might try to exfil.
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top secret")
+    # Repoint the row's stdout_path at it; replay must refuse to copy it out of
+    # the run dir and instead treat it as missing.
+    results_path = live_dir / "results.jsonl"
+    rows = [json_mod.loads(line) for line in results_path.read_text().splitlines() if line]
+    rows[0]["stdout_path"] = str(secret)
+    results_path.write_text("\n".join(json_mod.dumps(r) for r in rows) + "\n")
+    history_module._cached_results.cache_clear()
+
+    _, replay_results = run_benchmark(
+        repo_root=tmp_path,
+        suite="smoke",
+        agents=[fake_agent("pass")],
+        tasks=tasks,
+        runs_dir=tmp_path / "runs",
+        timeout_s=5,
+        run_id="replay-escape",
+        executor=SnapshotExecutor(live_dir),
+        kind="replay",
+        source_run_id="live-escape",
+        retry=0,
+    )
+    [replay_row] = replay_results
+    assert replay_row.outcome_status == "errored"
+    assert "captured stdout missing" in (replay_row.error or "")
+    # The secret must not have been copied into the replay artifacts.
+    replay_stdout = Path(replay_row.stdout_path)
+    if replay_stdout.exists():
+        assert "top secret" not in replay_stdout.read_text()
+
+
 def test_replay_missing_source_row_yields_errored_result(tmp_path: Path) -> None:
     live_dir, _ = _run_live(tmp_path, "live-pass-3")
     tasks = select_tasks(suite="smoke", repo_root=tmp_path)

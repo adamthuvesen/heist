@@ -3,7 +3,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<title>HEIST — Frontier Evaluation</title>
+<title>HEIST</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:ital,wght@0,300..800;1,400..600&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet">
@@ -169,7 +169,8 @@
   .score-bars-head{ display:flex; align-items:baseline; justify-content:space-between; padding:0 28px 22px; }
   .score-bars-title{ font-weight:620; font-size:17px; margin:0; letter-spacing:-0.02em; }
   .score-bars-kicker{ font-size:12px; letter-spacing:0.02em; color:var(--ink-3); }
-  .score-bars-chart{ display:grid; grid-template-columns:46px 1fr; column-gap:8px; padding:0 28px; overflow-x:auto; }
+  .score-bars-chart{ display:grid; grid-template-columns:46px 1fr; column-gap:8px; padding:0 28px; overflow-x:auto; scrollbar-width:none; }
+  .score-bars-chart::-webkit-scrollbar{ display:none; }
   .score-bars-axis{ display:flex; flex-direction:column; justify-content:space-between; height:320px; font-family:"JetBrains Mono",monospace; font-size:10px; color:var(--ink-3); text-align:right; padding-right:10px; }
   /* single-row plot; column count is set inline by JS so any agent count fits */
   .score-bars-plot{ position:relative; display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); column-gap:10px; min-width:0; }
@@ -397,11 +398,11 @@
 <div class="wrap">
   <header class="mast reveal">
     <div class="mast-row">
-      <div class="mast-left">HEIST · Frontier</div>
+      <div class="mast-left">HEIST</div>
       <div class="mast-mid">Evaluation Report</div>
       <div class="mast-right">2026 · 06 · 15</div>
     </div>
-    <h1 class="mast-title">Frontier Benchmark</h1>
+    <h1 class="mast-title">HEIST</h1>
     <div class="mast-sub">
       <div><span class="k">Agents evaluated</span><span class="v">10</span></div>
       <div><span class="k">Tasks per agent</span><span class="v">30</span></div>

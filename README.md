@@ -1,7 +1,5 @@
 # HEIST
 
-_Hidden Evaluation of Integrated System Tasks._
-
 HEIST is a local benchmark harness for CLI coding agents on multi-file
 engineering tasks. It runs an agent in an isolated workspace, grades the result
 with code the agent never sees, and keeps the run artifacts on disk for review.
@@ -39,13 +37,13 @@ dates, CLIs, and model versions can move the numbers.
 The main score is **alpha (α)**, a difficulty-weighted score where harder tasks
 count more than easier ones.
 
-![Scoreboard — agents ranked by alpha (α)](results/frontier-2026-06-15/img/scoreboard.png)
+![Scoreboard — agents ranked by alpha (α)](results/frontier-2026-06-15/img/report-scoreboard.png)
 
 The report also plots alpha against relative cost and speed. Cost and speed are
 indexed to the best result in the run, so the report shows tradeoffs without
 publishing absolute spend, latency, task names, or per-task rows.
 
-![Performance frontier — alpha against relative cost and relative speed](results/frontier-2026-06-15/img/performance-frontier.png)
+![Performance frontier — alpha against relative cost and relative speed](results/frontier-2026-06-15/img/report-performance-frontier.png)
 
 `tests/test_report_leakfree.py` checks that the published report does not expose
 held-out task details.

@@ -27,6 +27,13 @@ for the published report is **held out on purpose**: its prompts, graders, and
 reference solutions are not in this repo. Once those files are public, future
 scores can reflect exposure to the answer key instead of task performance.
 
+Public reproducibility has that boundary:
+
+- Public examples: reproducible from this repo.
+- Frontier report: reproducible only by the original private run owners.
+- Public substitute: run the example checks and inspect the leak-safe report
+  artifact in `results/frontier-2026-06-15/report.html`.
+
 ## Leaderboard
 
 The published report compares ten agents on the held-out 30-task frontier set:
@@ -57,6 +64,17 @@ uv run heist tasks list --suite examples
 uv run heist agents list
 ```
 
+No-auth demo:
+
+```bash
+uv run heist run --suite examples --all-agents --dry-run
+uv run python -m pytest tests/test_tasks.py
+```
+
+The dry run prints the public task/agent matrix without invoking any agent CLI.
+The task test proves the public example workspaces fail or partially pass, and
+their reference solutions score `1.0`.
+
 Run the three public example tasks against one installed and authenticated
 agent:
 
@@ -73,12 +91,6 @@ uv run heist run \
   --task ticket-lifecycle \
   --timeout 1200 \
   --agent claude-opus-4.8-xhigh
-```
-
-Preview a run without invoking an agent:
-
-```bash
-uv run heist run --suite examples --all-agents --dry-run
 ```
 
 Useful selection flags:
@@ -169,7 +181,7 @@ To add a task:
 6. Check the task:
 
 ```bash
-uv run pytest tests/test_tasks.py
+uv run python -m pytest tests/test_tasks.py
 uv run heist tasks list --suite <suite>
 ```
 

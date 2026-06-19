@@ -10,7 +10,7 @@ fix:
 	uv run ruff check --fix . && uv run ruff format .
 
 check: lint format
-	uv run pytest tests/ -q
+	uv run python -m pytest tests/ -q
 
 # Private source checkout and run dir. The held-out difficulty tier map stays in
 # the private repo; only the aggregate public report and PNGs are committed here.

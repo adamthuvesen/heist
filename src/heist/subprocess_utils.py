@@ -95,6 +95,99 @@ def tail_bytes(path: Path, max_bytes: int) -> bytes:
         return handle.read()
 
 
+def _register_process_group(
+    process: subprocess.Popen[bytes],
+    pgid_registry: set[int] | None,
+    pgid_lock: threading.Lock | None,
+) -> int | None:
+    try:
+        pgid = os.getpgid(process.pid)
+    except ProcessLookupError:
+        return None
+    if pgid_registry is not None and pgid_lock is not None:
+        with pgid_lock:
+            pgid_registry.add(pgid)
+    return pgid
+
+
+def _discard_process_group(
+    pgid: int | None,
+    pgid_registry: set[int] | None,
+    pgid_lock: threading.Lock | None,
+) -> None:
+    if pgid is not None and pgid_registry is not None and pgid_lock is not None:
+        with pgid_lock:
+            pgid_registry.discard(pgid)
+
+
+def _reap_after_timeout(process: subprocess.Popen[bytes], pgid: int | None) -> tuple[bytes, bytes]:
+    try:
+        return process.communicate(timeout=REAP_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        # SIGKILL hasn't taken effect within the grace window — either a
+        # grandchild escaped the session and is holding the pipes open, or the
+        # child is wedged. Re-issue SIGKILL to the group and reap the direct
+        # child so it isn't left as a zombie.
+        if pgid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pgid, signal.SIGKILL)
+        try:
+            process.wait(timeout=REAP_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "could not reap child pid=%s (pgid=%s) after SIGKILL; leaving it for the OS",
+                process.pid,
+                pgid,
+            )
+        return b"", b""
+
+
+def _communicate_with_timeout(
+    *,
+    process: subprocess.Popen[bytes],
+    input_text: str | None,
+    timeout_s: float,
+    pgid: int | None,
+) -> tuple[bytes, bytes, bool]:
+    try:
+        out_bytes, err_bytes = process.communicate(
+            input=input_text.encode() if input_text is not None else None,
+            timeout=timeout_s,
+        )
+        return out_bytes, err_bytes, False
+    except subprocess.TimeoutExpired:
+        kill_process_group(process.pid)
+        out_bytes, err_bytes = _reap_after_timeout(process, pgid)
+        return out_bytes, err_bytes, True
+
+
+def _output_target(files: contextlib.ExitStack, path: Path | None) -> IO[bytes] | int:
+    if path is None:
+        return subprocess.PIPE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return files.enter_context(path.open("wb"))
+
+
+def _start_process(
+    command: list[str],
+    *,
+    cwd: Path | None,
+    env: dict[str, str] | None,
+    input_text: str | None,
+    stdout_target: IO[bytes] | int,
+    stderr_target: IO[bytes] | int,
+) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=stdout_target,
+        stderr=stderr_target,
+        start_new_session=True,
+    )
+
+
 def run_subprocess_safely(
     command: list[str],
     *,
@@ -118,75 +211,28 @@ def run_subprocess_safely(
     can cancel in-flight work.
     """
     with contextlib.ExitStack() as files:
-        stdout_target: IO[bytes] | int
-        stderr_target: IO[bytes] | int
-        if stdout_path is not None:
-            stdout_path.parent.mkdir(parents=True, exist_ok=True)
-            stdout_target = files.enter_context(stdout_path.open("wb"))
-        else:
-            stdout_target = subprocess.PIPE
-        if stderr_path is not None:
-            stderr_path.parent.mkdir(parents=True, exist_ok=True)
-            stderr_target = files.enter_context(stderr_path.open("wb"))
-        else:
-            stderr_target = subprocess.PIPE
-
         # If Popen raises (missing binary, permission denied, fork failure)
         # the ExitStack still closes the stdout/stderr files we just opened.
-        process = subprocess.Popen(
+        process = _start_process(
             command,
             cwd=cwd,
             env=env,
-            stdin=subprocess.PIPE if input_text is not None else None,
-            stdout=stdout_target,
-            stderr=stderr_target,
-            start_new_session=True,
+            input_text=input_text,
+            stdout_target=_output_target(files, stdout_path),
+            stderr_target=_output_target(files, stderr_path),
         )
 
-        pgid: int | None = None
-        try:
-            pgid = os.getpgid(process.pid)
-        except ProcessLookupError:
-            pgid = None
-        if pgid is not None and pgid_registry is not None and pgid_lock is not None:
-            with pgid_lock:
-                pgid_registry.add(pgid)
+        pgid = _register_process_group(process, pgid_registry, pgid_lock)
 
-        out_bytes = b""
-        err_bytes = b""
-        timed_out = False
         try:
-            out_bytes, err_bytes = process.communicate(
-                input=input_text.encode() if input_text is not None else None,
-                timeout=timeout_s,
+            out_bytes, err_bytes, timed_out = _communicate_with_timeout(
+                process=process,
+                input_text=input_text,
+                timeout_s=timeout_s,
+                pgid=pgid,
             )
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            kill_process_group(process.pid)
-            try:
-                out_bytes, err_bytes = process.communicate(timeout=REAP_TIMEOUT_S)
-            except subprocess.TimeoutExpired:
-                # SIGKILL hasn't taken effect within the grace window — either a
-                # grandchild escaped the session and is holding the pipes open,
-                # or the child is wedged. Re-issue SIGKILL to the group and reap
-                # the direct child so it isn't left as a zombie.
-                out_bytes, err_bytes = b"", b""
-                if pgid is not None:
-                    with contextlib.suppress(ProcessLookupError, PermissionError):
-                        os.killpg(pgid, signal.SIGKILL)
-                try:
-                    process.wait(timeout=REAP_TIMEOUT_S)
-                except subprocess.TimeoutExpired:
-                    logger.warning(
-                        "could not reap child pid=%s (pgid=%s) after SIGKILL; "
-                        "leaving it for the OS",
-                        process.pid,
-                        pgid,
-                    )
         finally:
-            if pgid is not None and pgid_registry is not None and pgid_lock is not None:
-                with pgid_lock:
-                    pgid_registry.discard(pgid)
+            _discard_process_group(pgid, pgid_registry, pgid_lock)
 
     if stdout_path is not None:
         out_bytes = tail_bytes(stdout_path, tail_bytes_cap)

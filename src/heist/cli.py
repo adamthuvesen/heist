@@ -1049,6 +1049,32 @@ def _replay_agents_from_source(
     ]
 
 
+def _select_replay_ids(
+    *,
+    source_run_id: str,
+    kind: str,
+    available: list[str],
+    requested: list[str] | None,
+    exclude: list[str] | None = None,
+) -> list[str]:
+    if requested:
+        unknown = [value for value in requested if value not in available]
+        if unknown:
+            raise ValueError(
+                f"Source run {source_run_id} has no rows for {kind}(s): "
+                f"{', '.join(unknown)}. Known {kind}s: {', '.join(available)}"
+            )
+        requested_set = set(requested)
+        selected = [value for value in available if value in requested_set]
+    else:
+        selected = list(available)
+
+    if exclude:
+        excluded = set(exclude)
+        selected = [value for value in selected if value not in excluded]
+    return selected
+
+
 @runs_app.command("replay")
 def runs_replay(
     source: Annotated[
@@ -1131,36 +1157,31 @@ def runs_replay(
     selectable_agents = sorted({row.agent_id for row in source_results})
     selectable_tasks = sorted({row.task_id for row in source_results})
 
-    if agent:
-        unknown_agents = [aid for aid in agent if aid not in selectable_agents]
-        if unknown_agents:
-            console.print(
-                f"[red]Source run {source_run_id} has no rows for agent(s): "
-                f"{', '.join(unknown_agents)}. Known agents: "
-                f"{', '.join(selectable_agents)}[/red]"
-            )
-            raise typer.Exit(code=1)
-        chosen_agents = [aid for aid in selectable_agents if aid in set(agent)]
-    else:
-        chosen_agents = list(selectable_agents)
-    if exclude_agent:
-        chosen_agents = [aid for aid in chosen_agents if aid not in set(exclude_agent)]
+    try:
+        chosen_agents = _select_replay_ids(
+            source_run_id=source_run_id,
+            kind="agent",
+            available=selectable_agents,
+            requested=agent,
+            exclude=exclude_agent,
+        )
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(code=1) from error
     if not chosen_agents:
         console.print("[red]No agents selected for replay after filters applied.[/red]")
         raise typer.Exit(code=1)
 
-    if task:
-        unknown_tasks = [tid for tid in task if tid not in selectable_tasks]
-        if unknown_tasks:
-            console.print(
-                f"[red]Source run {source_run_id} has no rows for task(s): "
-                f"{', '.join(unknown_tasks)}. Known tasks: "
-                f"{', '.join(selectable_tasks)}[/red]"
-            )
-            raise typer.Exit(code=1)
-        chosen_tasks = [tid for tid in selectable_tasks if tid in set(task)]
-    else:
-        chosen_tasks = list(selectable_tasks)
+    try:
+        chosen_tasks = _select_replay_ids(
+            source_run_id=source_run_id,
+            kind="task",
+            available=selectable_tasks,
+            requested=task,
+        )
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(code=1) from error
 
     filtered_rows = [
         row

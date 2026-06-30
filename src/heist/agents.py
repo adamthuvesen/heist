@@ -216,6 +216,66 @@ def available_agents(
     return available
 
 
+def _missing_agent_ids(agent_ids: list[str], available: dict[str, AgentSpec]) -> list[str]:
+    return [agent_id for agent_id in agent_ids if agent_id not in available]
+
+
+def _select_agent_ids(
+    *,
+    available: dict[str, AgentSpec],
+    agent_ids: list[str] | None,
+    all_agents: bool,
+    providers: list[str] | None,
+    default_set: list[str] | None,
+) -> list[str]:
+    known = ", ".join(sorted(available))
+    if agent_ids:
+        missing = _missing_agent_ids(agent_ids, available)
+        if missing:
+            raise KeyError(f"Unknown agent(s): {', '.join(missing)}. Known agents: {known}")
+        return list(agent_ids)
+
+    if providers:
+        wanted = {p.strip().lower() for p in providers}
+        selected = [
+            agent_id for agent_id, spec in available.items() if spec.provider.lower() in wanted
+        ]
+        if not selected:
+            raise KeyError(f"No agents match provider(s) {sorted(wanted)!r}. Known agents: {known}")
+        return selected
+
+    if all_agents:
+        return list(available.keys())
+
+    if default_set:
+        missing = _missing_agent_ids(default_set, available)
+        if missing:
+            raise KeyError(
+                f"Config default_agents references unknown agent(s): {', '.join(missing)}. "
+                f"Known agents: {known}"
+            )
+        return list(default_set)
+
+    return list(DEFAULT_AGENT_IDS)
+
+
+def _exclude_agent_ids(
+    selected: list[str], exclude: list[str] | None, available: dict[str, AgentSpec]
+) -> list[str]:
+    if not exclude:
+        return selected
+
+    drop = set(exclude)
+    unknown = drop - set(available.keys())
+    if unknown:
+        raise KeyError(f"--exclude-agent references unknown agent(s): {', '.join(sorted(unknown))}")
+
+    filtered = [agent_id for agent_id in selected if agent_id not in drop]
+    if not filtered:
+        raise KeyError("Agent selection is empty after applying --exclude-agent.")
+    return filtered
+
+
 def resolve_agents(
     agent_ids: list[str] | None,
     agent_file: Path | None = None,
@@ -238,42 +298,13 @@ def resolve_agents(
     `exclude` is applied after selection.
     """
     available = available_agents(agent_file=agent_file, extra_files=extra_files)
-    known = ", ".join(sorted(available))
-
-    if agent_ids:
-        missing = [agent_id for agent_id in agent_ids if agent_id not in available]
-        if missing:
-            raise KeyError(f"Unknown agent(s): {', '.join(missing)}. Known agents: {known}")
-        selected = list(agent_ids)
-    elif providers:
-        wanted = {p.strip().lower() for p in providers}
-        selected = [
-            agent_id for agent_id, spec in available.items() if spec.provider.lower() in wanted
-        ]
-        if not selected:
-            raise KeyError(f"No agents match provider(s) {sorted(wanted)!r}. Known agents: {known}")
-    elif all_agents:
-        selected = list(available.keys())
-    elif default_set:
-        missing = [agent_id for agent_id in default_set if agent_id not in available]
-        if missing:
-            raise KeyError(
-                f"Config default_agents references unknown agent(s): {', '.join(missing)}. "
-                f"Known agents: {known}"
-            )
-        selected = list(default_set)
-    else:
-        selected = list(DEFAULT_AGENT_IDS)
-
-    if exclude:
-        drop = set(exclude)
-        unknown = drop - set(available.keys())
-        if unknown:
-            raise KeyError(
-                f"--exclude-agent references unknown agent(s): {', '.join(sorted(unknown))}"
-            )
-        selected = [agent_id for agent_id in selected if agent_id not in drop]
-        if not selected:
-            raise KeyError("Agent selection is empty after applying --exclude-agent.")
+    selected = _select_agent_ids(
+        available=available,
+        agent_ids=agent_ids,
+        all_agents=all_agents,
+        providers=providers,
+        default_set=default_set,
+    )
+    selected = _exclude_agent_ids(selected, exclude, available)
 
     return [available[agent_id] for agent_id in selected]

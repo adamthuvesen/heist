@@ -103,10 +103,32 @@ def _model_usage_costs(value: object) -> Iterator[tuple[float, str]]:
             yield cost, f"modelUsage.{model_id}.costUSD"
 
 
+def _model_usage_total(value: object) -> tuple[float, str] | None:
+    if not isinstance(value, dict):
+        return None
+
+    total = 0.0
+    sources: list[str] = []
+    for cost, source in _model_usage_costs(value):
+        total += cost
+        sources.append(source)
+    if not sources:
+        return None
+    return total, "+".join(sources)
+
+
 # Cost priority tiers, lowest = most authoritative.
 _TIER_TOTAL = 0  # explicit session total (total_cost_usd) — cumulative
 _TIER_MODEL_USAGE = 1  # sum of per-model costUSD — per-turn
 _TIER_BARE_COST = 2  # a bare cost_usd / cost key — per-turn
+
+
+def _reported_cost_tier(key: object) -> int | None:
+    if key in REPORTED_TOTAL_COST_KEYS:
+        return _TIER_TOTAL
+    if key in REPORTED_COST_KEYS:
+        return _TIER_BARE_COST
+    return None
 
 
 def _line_cost(payload: object) -> dict[int, tuple[float, str]]:
@@ -129,27 +151,24 @@ def _line_cost(payload: object) -> dict[int, tuple[float, str]]:
     while stack:
         current = stack.pop()
         if isinstance(current, dict):
-            model_usage = current.get("modelUsage")
-            if isinstance(model_usage, dict):
-                total = 0.0
-                sources: list[str] = []
-                for cost, source in _model_usage_costs(model_usage):
-                    total += cost
-                    sources.append(source)
-                if sources:
-                    offer(_TIER_MODEL_USAGE, total, "+".join(sources))
+            model_usage_total = _model_usage_total(current.get("modelUsage"))
+            if model_usage_total is not None:
+                offer(_TIER_MODEL_USAGE, *model_usage_total)
             for key, child in current.items():
                 if key == "modelUsage":
                     continue  # aggregated above; don't descend (avoids double-count)
                 cost = _float_value(child)
-                if cost is not None and key in REPORTED_TOTAL_COST_KEYS:
-                    offer(_TIER_TOTAL, cost, str(key))
-                elif cost is not None and key in REPORTED_COST_KEYS:
-                    offer(_TIER_BARE_COST, cost, str(key))
+                tier = _reported_cost_tier(key)
+                if cost is not None and tier is not None:
+                    offer(tier, cost, str(key))
                 stack.append(child)
         elif isinstance(current, list):
             stack.extend(current)
     return tiers
+
+
+def _max_int(obj: dict[str, object], keys: set[str]) -> int:
+    return max(0, *(_int_value(obj.get(key)) for key in keys))
 
 
 def _per_line_usage(payload: object) -> tuple[int, int, int, int]:
@@ -170,11 +189,11 @@ def _per_line_usage(payload: object) -> tuple[int, int, int, int]:
     best_cache_read = 0
     best_cache_write = 0
     for obj in _objects(payload):
-        obj_input = max(0, *(_int_value(obj.get(key)) for key in INPUT_KEYS))
-        obj_output = max(0, *(_int_value(obj.get(key)) for key in OUTPUT_KEYS))
-        obj_cache_read = max(0, *(_int_value(obj.get(key)) for key in CACHE_READ_KEYS))
-        obj_cache_write = max(0, *(_int_value(obj.get(key)) for key in CACHE_WRITE_KEYS))
-        subset_cache = max(0, *(_int_value(obj.get(key)) for key in OPENAI_SUBSET_CACHE_KEYS))
+        obj_input = _max_int(obj, INPUT_KEYS)
+        obj_output = _max_int(obj, OUTPUT_KEYS)
+        obj_cache_read = _max_int(obj, CACHE_READ_KEYS)
+        obj_cache_write = _max_int(obj, CACHE_WRITE_KEYS)
+        subset_cache = _max_int(obj, OPENAI_SUBSET_CACHE_KEYS)
         if subset_cache > 0 and obj_input >= subset_cache:
             obj_input -= subset_cache
         best_input = max(best_input, obj_input)

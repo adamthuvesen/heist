@@ -187,7 +187,6 @@ def cross_run_table(
     for an O(N) scan it would discard.
     """
     summaries, _ = load_all_runs(runs_dir)
-    summaries_by_id = {s.run_id: s for s in summaries}
     rows: list[dict[str, object]] = []
     for summary in summaries:
         if agent_id is not None and agent_id not in summary.agent_ids:
@@ -202,7 +201,7 @@ def cross_run_table(
             rows.append(
                 {
                     "run_id": summary.run_id,
-                    "created_at": summaries_by_id[summary.run_id].created_at,
+                    "created_at": summary.created_at,
                     "agent_id": result.agent_id,
                     "agent_label": result.agent_label,
                     "task_id": result.task_id,
@@ -302,6 +301,30 @@ class AmbiguousRunRef(HistoryError):
     """A value matches both a baseline tag and a literal run id."""
 
 
+def _baseline_target(runs_dir: Path, value: str, baselines: BaselineRegistry) -> str | None:
+    target = baselines.get(value)
+    if target is None:
+        return None
+    try:
+        target_exists = _run_exists(runs_dir, target)
+    except HistoryError as error:
+        raise HistoryError(
+            f"baseline tag {value!r} points to missing or invalid run {target!r}"
+        ) from error
+    if not target_exists:
+        raise HistoryError(f"baseline tag {value!r} points to missing or invalid run {target!r}")
+    return target
+
+
+def _literal_exists_for_ref(runs_dir: Path, value: str, *, tag_target: str | None) -> bool:
+    try:
+        return _run_exists(runs_dir, value)
+    except HistoryError:
+        if tag_target is None:
+            raise
+        return False
+
+
 def resolve_run_ref(
     runs_dir: Path,
     value: str,
@@ -325,24 +348,8 @@ def resolve_run_ref(
         return value, None
 
     baselines = baselines if baselines is not None else BaselineRegistry.load(runs_dir)
-    tag_target = baselines.get(value)
-    if tag_target is not None:
-        try:
-            target_exists = _run_exists(runs_dir, tag_target)
-        except HistoryError as error:
-            raise HistoryError(
-                f"baseline tag {value!r} points to missing or invalid run {tag_target!r}"
-            ) from error
-        if not target_exists:
-            raise HistoryError(
-                f"baseline tag {value!r} points to missing or invalid run {tag_target!r}"
-            )
-    literal_exists = False
-    try:
-        literal_exists = _run_exists(runs_dir, value)
-    except HistoryError:
-        if tag_target is None:
-            raise
+    tag_target = _baseline_target(runs_dir, value, baselines)
+    literal_exists = _literal_exists_for_ref(runs_dir, value, tag_target=tag_target)
 
     if value in RESERVED_REFS:
         summaries = summaries if summaries is not None else load_all_runs(runs_dir)[0]

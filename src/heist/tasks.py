@@ -32,6 +32,40 @@ def list_suites(repo_root: Path | None = None) -> list[str]:
     return sorted(suites)
 
 
+def _load_task_spec(spec_path: Path) -> TaskSpec:
+    try:
+        raw_spec = yaml.safe_load(spec_path.read_text())
+    except yaml.YAMLError as error:
+        raise ValueError(f"Task file contains invalid YAML: {spec_path}: {error}") from error
+    return TaskSpec.model_validate(raw_spec)
+
+
+def _load_task_definition(suite: str, task_dir: Path) -> TaskDefinition:
+    spec_path = task_dir / "task.yaml"
+    spec = _load_task_spec(spec_path)
+    if spec.id != task_dir.name:
+        raise ValueError(
+            f"Task id mismatch in {spec_path}: id {spec.id!r} must match "
+            f"directory name {task_dir.name!r}"
+        )
+
+    workspace_path = task_dir / "workspace"
+    hidden_path = task_dir / "hidden"
+    reference_path = task_dir / "reference"
+    for required in [workspace_path, hidden_path, reference_path]:
+        if not required.exists():
+            raise FileNotFoundError(f"Task {spec.id} missing {required.name}/")
+
+    return TaskDefinition(
+        suite=suite,
+        spec=spec,
+        path=task_dir,
+        workspace_path=workspace_path,
+        hidden_path=hidden_path,
+        reference_path=reference_path,
+    )
+
+
 def load_tasks(suite: str = "smoke", repo_root: Path | None = None) -> list[TaskDefinition]:
     suite_dir = task_root(repo_root) / suite
     if not suite_dir.exists():
@@ -43,36 +77,50 @@ def load_tasks(suite: str = "smoke", repo_root: Path | None = None) -> list[Task
         spec_path = task_dir / "task.yaml"
         if not spec_path.exists():
             continue
-        try:
-            raw_spec = yaml.safe_load(spec_path.read_text())
-        except yaml.YAMLError as error:
-            raise ValueError(f"Task file contains invalid YAML: {spec_path}: {error}") from error
-        spec = TaskSpec.model_validate(raw_spec)
-        if spec.id != task_dir.name:
-            raise ValueError(
-                f"Task id mismatch in {spec_path}: id {spec.id!r} must match "
-                f"directory name {task_dir.name!r}"
-            )
-        if spec.id in seen_ids:
-            raise ValueError(f"Duplicate task id {spec.id!r} in suite {suite!r}")
-        seen_ids.add(spec.id)
-        workspace_path = task_dir / "workspace"
-        hidden_path = task_dir / "hidden"
-        reference_path = task_dir / "reference"
-        for required in [workspace_path, hidden_path, reference_path]:
-            if not required.exists():
-                raise FileNotFoundError(f"Task {spec.id} missing {required.name}/")
-        tasks.append(
-            TaskDefinition(
-                suite=suite,
-                spec=spec,
-                path=task_dir,
-                workspace_path=workspace_path,
-                hidden_path=hidden_path,
-                reference_path=reference_path,
-            )
-        )
+        task = _load_task_definition(suite, task_dir)
+        if task.id in seen_ids:
+            raise ValueError(f"Duplicate task id {task.id!r} in suite {suite!r}")
+        seen_ids.add(task.id)
+        tasks.append(task)
     return tasks
+
+
+def _select_task_ids(
+    tasks: list[TaskDefinition], task_ids: list[str] | None
+) -> list[TaskDefinition]:
+    if not task_ids:
+        return tasks
+
+    by_id = {task.id: task for task in tasks}
+    missing = [task_id for task_id in task_ids if task_id not in by_id]
+    if missing:
+        raise KeyError(f"Unknown task(s): {', '.join(missing)}")
+    return [by_id[task_id] for task_id in task_ids]
+
+
+def _filter_tasks_by_glob(
+    tasks: list[TaskDefinition], *, suite: str, pattern: str | None
+) -> list[TaskDefinition]:
+    if not pattern:
+        return tasks
+
+    filtered = [task for task in tasks if fnmatch.fnmatch(task.id, pattern)]
+    if not filtered:
+        raise KeyError(f"--task-glob {pattern!r} did not match any task in suite {suite!r}")
+    return filtered
+
+
+def _filter_tasks_by_category(
+    tasks: list[TaskDefinition], *, suite: str, category: str | None
+) -> list[TaskDefinition]:
+    if not category:
+        return tasks
+
+    wanted = category.strip().lower()
+    filtered = [task for task in tasks if task.spec.category.lower() == wanted]
+    if not filtered:
+        raise KeyError(f"--task-category {category!r} did not match any task in suite {suite!r}")
+    return filtered
 
 
 def select_tasks(
@@ -89,27 +137,9 @@ def select_tasks(
     then `category`. Returns the full suite when no filters are given.
     """
     tasks = load_tasks(suite=suite, repo_root=repo_root)
-
-    if task_ids:
-        by_id = {task.id: task for task in tasks}
-        missing = [task_id for task_id in task_ids if task_id not in by_id]
-        if missing:
-            raise KeyError(f"Unknown task(s): {', '.join(missing)}")
-        tasks = [by_id[task_id] for task_id in task_ids]
-
-    if glob:
-        tasks = [task for task in tasks if fnmatch.fnmatch(task.id, glob)]
-        if not tasks:
-            raise KeyError(f"--task-glob {glob!r} did not match any task in suite {suite!r}")
-
-    if category:
-        wanted = category.strip().lower()
-        tasks = [task for task in tasks if task.spec.category.lower() == wanted]
-        if not tasks:
-            raise KeyError(
-                f"--task-category {category!r} did not match any task in suite {suite!r}"
-            )
-
+    tasks = _select_task_ids(tasks, task_ids)
+    tasks = _filter_tasks_by_glob(tasks, suite=suite, pattern=glob)
+    tasks = _filter_tasks_by_category(tasks, suite=suite, category=category)
     return tasks
 
 

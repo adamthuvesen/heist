@@ -172,55 +172,56 @@ class _AgentMetrics:
     alpha: float
 
 
+def _agent_metrics(agent_id: str, agent_results: list[TaskRunResult]) -> _AgentMetrics:
+    n = len(agent_results)
+    graded = [r for r in agent_results if r.outcome_status == "graded"]
+    wins = sum(1 for r in graded if r.success)
+    ge90 = sum(1 for r in agent_results if r.score >= 0.90)
+    mean_score = sum(r.score for r in agent_results) / n if n else 0.0
+    total_cost = sum(_primary_cost(r) or 0.0 for r in agent_results)
+    total_latency = sum(r.latency_s or 0.0 for r in agent_results)
+    all_latencies = [r.latency_s or 0.0 for r in agent_results]
+    # Latency restricted to passing tasks — separates "fast model" from
+    # "model that gives up sooner / thrashes on hard tasks".
+    success_latencies = [r.latency_s or 0.0 for r in graded if r.success]
+    success_latency = sum(success_latencies)
+    # Latency restricted to passing tasks that COMPLETED normally — excludes
+    # wall-clock-killed rows whose latency reflects the timeout cap rather
+    # than the agent's actual speed. Gate on the timeout signal itself, not
+    # cost provenance: a passing row's measured wall-clock latency is
+    # trustworthy even when its *cost* could only be estimated.
+    clean_pass = [r for r in agent_results if r.success and not r.timed_out]
+    clean_pass_latencies = [r.latency_s or 0.0 for r in clean_pass]
+    any_estimated = any(r.cost_source in ("reconstructed", "estimated") for r in agent_results)
+    alpha = difficulty.sc_alpha((r.task_id, r.score) for r in agent_results)
+    return _AgentMetrics(
+        agent_id=agent_id,
+        label=agent_results[0].agent_label,
+        model_id=agent_results[0].model_id,
+        tasks=n,
+        wins=wins,
+        ge90=ge90,
+        mean_score=mean_score,
+        total_cost=total_cost,
+        total_latency=total_latency,
+        success_latency=success_latency,
+        median_latency=_latency_median(all_latencies),
+        median_success_latency=_latency_median(success_latencies),
+        clean_pass_count=len(clean_pass),
+        clean_pass_lat_median=_latency_median(clean_pass_latencies),
+        any_cost_estimated=any_estimated,
+        alpha=alpha,
+    )
+
+
 def _compute_agent_metrics(results: list[TaskRunResult]) -> list[_AgentMetrics]:
     groups: dict[str, list[TaskRunResult]] = defaultdict(list)
     for result in results:
         groups[result.agent_id].append(result)
-
-    rows: list[_AgentMetrics] = []
-    for agent_id, agent_results in sorted(groups.items()):
-        n = len(agent_results)
-        graded = [r for r in agent_results if r.outcome_status == "graded"]
-        wins = sum(1 for r in graded if r.success)
-        ge90 = sum(1 for r in agent_results if r.score >= 0.90)
-        mean_score = sum(r.score for r in agent_results) / n if n else 0.0
-        total_cost = sum(_primary_cost(r) or 0.0 for r in agent_results)
-        total_latency = sum(r.latency_s or 0.0 for r in agent_results)
-        all_latencies = [r.latency_s or 0.0 for r in agent_results]
-        # Latency restricted to passing tasks — separates "fast model" from
-        # "model that gives up sooner / thrashes on hard tasks".
-        success_latencies = [r.latency_s or 0.0 for r in graded if r.success]
-        success_latency = sum(success_latencies)
-        # Latency restricted to passing tasks that COMPLETED normally — excludes
-        # wall-clock-killed rows whose latency reflects the timeout cap rather
-        # than the agent's actual speed. Gate on the timeout signal itself, not
-        # cost provenance: a passing row's measured wall-clock latency is
-        # trustworthy even when its *cost* could only be estimated.
-        clean_pass = [r for r in agent_results if r.success and not r.timed_out]
-        clean_pass_latencies = [r.latency_s or 0.0 for r in clean_pass]
-        any_estimated = any(r.cost_source in ("reconstructed", "estimated") for r in agent_results)
-        alpha = difficulty.sc_alpha((r.task_id, r.score) for r in agent_results)
-        rows.append(
-            _AgentMetrics(
-                agent_id=agent_id,
-                label=agent_results[0].agent_label,
-                model_id=agent_results[0].model_id,
-                tasks=n,
-                wins=wins,
-                ge90=ge90,
-                mean_score=mean_score,
-                total_cost=total_cost,
-                total_latency=total_latency,
-                success_latency=success_latency,
-                median_latency=_latency_median(all_latencies),
-                median_success_latency=_latency_median(success_latencies),
-                clean_pass_count=len(clean_pass),
-                clean_pass_lat_median=_latency_median(clean_pass_latencies),
-                any_cost_estimated=any_estimated,
-                alpha=alpha,
-            )
-        )
-    return rows
+    return [
+        _agent_metrics(agent_id, agent_results)
+        for agent_id, agent_results in sorted(groups.items())
+    ]
 
 
 def summarize_by_agent(results: list[TaskRunResult]) -> list[dict[str, object]]:

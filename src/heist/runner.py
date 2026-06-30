@@ -47,6 +47,7 @@ from heist.usage import capture_usage, choose_cost
 logger = logging.getLogger("heist.runner")
 
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_BenchmarkJob = tuple[int, AgentSpec, TaskDefinition]
 
 
 class ReporterProtocol(Protocol):
@@ -503,6 +504,77 @@ def _graded_result(
     )
 
 
+@dataclass(frozen=True)
+class _JobContext:
+    manifest: RunManifest
+    agent: AgentSpec
+    task: TaskDefinition
+    workspace: Path
+    artifact_dir: Path
+    grader_path: Path
+    diff_path: Path
+
+    @classmethod
+    def create(
+        cls, *, manifest: RunManifest, agent: AgentSpec, task: TaskDefinition, run_dir: Path
+    ) -> _JobContext:
+        safe_agent = agent.id.replace("/", "_")
+        workspace = run_dir / "workspaces" / safe_agent / task.id
+        artifact_dir = run_dir / "artifacts" / safe_agent / task.id
+        return cls(
+            manifest=manifest,
+            agent=agent,
+            task=task,
+            workspace=workspace,
+            artifact_dir=artifact_dir,
+            grader_path=artifact_dir / "grader.json",
+            diff_path=artifact_dir / "diff.patch",
+        )
+
+    def empty_execution(self) -> AgentExecution:
+        return _empty_execution(self.artifact_dir)
+
+    def errored(
+        self,
+        *,
+        execution: AgentExecution,
+        error: str,
+        cheating_detected: bool = False,
+        attempted_grader_read: bool = False,
+    ) -> TaskRunResult:
+        return _errored_result(
+            manifest=self.manifest,
+            agent=self.agent,
+            task=self.task,
+            workspace=self.workspace,
+            diff_path=self.diff_path,
+            grader_path=self.grader_path,
+            execution=execution,
+            error=error,
+            cheating_detected=cheating_detected,
+            attempted_grader_read=attempted_grader_read,
+        )
+
+    def graded(
+        self,
+        *,
+        execution: AgentExecution,
+        grader: GraderResult,
+        attempted_grader_read: bool = False,
+    ) -> TaskRunResult:
+        return _graded_result(
+            manifest=self.manifest,
+            agent=self.agent,
+            task=self.task,
+            workspace=self.workspace,
+            diff_path=self.diff_path,
+            grader_path=self.grader_path,
+            execution=execution,
+            grader=grader,
+            attempted_grader_read=attempted_grader_read,
+        )
+
+
 class LiveExecutor:
     """Default `Executor` — copies the task workspace and invokes the agent CLI.
 
@@ -572,52 +644,81 @@ def _run_benchmark_job(
     pgid_lock: threading.Lock | None = None,
     sandbox: bool = False,
 ) -> TaskRunResult:
-    safe_agent = agent.id.replace("/", "_")
-    workspace = run_dir / "workspaces" / safe_agent / task.id
-    artifact_dir = run_dir / "artifacts" / safe_agent / task.id
-    grader_path = artifact_dir / "grader.json"
-    diff_path = artifact_dir / "diff.patch"
+    ctx = _JobContext.create(manifest=manifest, agent=agent, task=task, run_dir=run_dir)
+    effective_timeout_s = task.spec.timeout_s or timeout_s
+    try:
+        execution = _execute_with_retries(
+            ctx=ctx,
+            executor=executor,
+            timeout_s=effective_timeout_s,
+            retry=retry,
+            pgid_registry=pgid_registry,
+            pgid_lock=pgid_lock,
+        )
+    except ExecutorAborted as error:
+        return _executor_aborted_result(ctx, error)
 
+    diff_error = _diff_error_result(ctx=ctx, executor=executor, execution=execution)
+    if diff_error is not None:
+        return diff_error
+
+    integrity_error, attempted_grader_read = _integrity_error_result(
+        ctx=ctx, execution=execution, sandbox=sandbox
+    )
+    if integrity_error is not None:
+        return integrity_error
+
+    agent_error = _agent_error_result(
+        ctx=ctx,
+        execution=execution,
+        effective_timeout_s=effective_timeout_s,
+        attempted_grader_read=attempted_grader_read,
+    )
+    if agent_error is not None:
+        return agent_error
+
+    return _grade_job(
+        ctx=ctx,
+        execution=execution,
+        pgid_registry=pgid_registry,
+        pgid_lock=pgid_lock,
+        attempted_grader_read=attempted_grader_read,
+    )
+
+
+def _execute_with_retries(
+    *,
+    ctx: _JobContext,
+    executor: Executor,
+    timeout_s: int,
+    retry: int,
+    pgid_registry: set[int] | None,
+    pgid_lock: threading.Lock | None,
+) -> AgentExecution:
     attempts = max(1, retry + 1)
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            executor.prepare_workspace(agent=agent, task=task, workspace=workspace)
-            execution = executor.run(
-                agent=agent,
-                task=task,
-                workspace=workspace,
-                artifact_dir=artifact_dir,
-                timeout_s=task.spec.timeout_s or timeout_s,
+            executor.prepare_workspace(agent=ctx.agent, task=ctx.task, workspace=ctx.workspace)
+            return executor.run(
+                agent=ctx.agent,
+                task=ctx.task,
+                workspace=ctx.workspace,
+                artifact_dir=ctx.artifact_dir,
+                timeout_s=timeout_s,
                 pgid_registry=pgid_registry,
                 pgid_lock=pgid_lock,
             )
-            break
-        except ExecutorAborted as error:
-            # Don't retry — these are terminal-for-this-pair signals
-            # (missing env, replay source missing). Record an errored row
-            # with the executor's message and let the run continue.
-            logger.error("%s", error)
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            diff_path.write_text("")
-            return _errored_result(
-                manifest=manifest,
-                agent=agent,
-                task=task,
-                workspace=workspace,
-                diff_path=diff_path,
-                grader_path=grader_path,
-                execution=_empty_execution(artifact_dir),
-                error=str(error),
-            )
+        except ExecutorAborted:
+            raise
         except Exception as error:
             last_exc = error
             logger.warning(
                 "agent invocation failed (attempt %d/%d) for %s on %s: %s",
                 attempt,
                 attempts,
-                agent.id,
-                task.id,
+                ctx.agent.id,
+                ctx.task.id,
                 error,
             )
             if attempt >= attempts:
@@ -625,53 +726,67 @@ def _run_benchmark_job(
     else:  # pragma: no cover - the loop always breaks or raises
         raise RuntimeError(f"unreachable: {last_exc}")
 
+
+def _executor_aborted_result(ctx: _JobContext, error: ExecutorAborted) -> TaskRunResult:
+    # Don't retry — these are terminal-for-this-pair signals (missing env,
+    # replay source missing). Record an errored row and let the run continue.
+    logger.error("%s", error)
+    ctx.artifact_dir.mkdir(parents=True, exist_ok=True)
+    ctx.diff_path.write_text("")
+    return ctx.errored(execution=ctx.empty_execution(), error=str(error))
+
+
+def _diff_error_result(
+    *, ctx: _JobContext, executor: Executor, execution: AgentExecution
+) -> TaskRunResult | None:
     try:
-        executor.write_diff(agent=agent, task=task, workspace=workspace, diff_path=diff_path)
+        executor.write_diff(
+            agent=ctx.agent,
+            task=ctx.task,
+            workspace=ctx.workspace,
+            diff_path=ctx.diff_path,
+        )
     except RuntimeError as error:
-        logger.error("git diff capture failed for %s on %s: %s", agent.id, task.id, error)
-        return _errored_result(
-            manifest=manifest,
-            agent=agent,
-            task=task,
-            workspace=workspace,
-            diff_path=diff_path,
-            grader_path=grader_path,
+        logger.error("git diff capture failed for %s on %s: %s", ctx.agent.id, ctx.task.id, error)
+        return ctx.errored(
             execution=execution,
             error=str(error),
         )
+    return None
 
+
+def _integrity_error_result(
+    *, ctx: _JobContext, execution: AgentExecution, sandbox: bool
+) -> tuple[TaskRunResult | None, bool]:
     access = detect_grader_access(
-        execution.stdout_path, execution.stderr_path, task, sandboxed=sandbox
+        execution.stdout_path, execution.stderr_path, ctx.task, sandboxed=sandbox
     )
     if access.contaminated is not None:
-        logger.error("integrity: %s on %s — %s", agent.id, task.id, access.contaminated)
-        return _errored_result(
-            manifest=manifest,
-            agent=agent,
-            task=task,
-            workspace=workspace,
-            diff_path=diff_path,
-            grader_path=grader_path,
+        logger.error("integrity: %s on %s — %s", ctx.agent.id, ctx.task.id, access.contaminated)
+        return ctx.errored(
             execution=execution,
             error=f"cheating-detected: {access.contaminated}",
             cheating_detected=True,
             attempted_grader_read=True,
-        )
+        ), True
     attempted = access.attempted is not None
     if attempted:
-        logger.warning("integrity: %s on %s — %s", agent.id, task.id, access.attempted)
+        logger.warning("integrity: %s on %s — %s", ctx.agent.id, ctx.task.id, access.attempted)
+    return None, attempted
 
+
+def _agent_error_result(
+    *,
+    ctx: _JobContext,
+    execution: AgentExecution,
+    effective_timeout_s: int,
+    attempted_grader_read: bool,
+) -> TaskRunResult | None:
     if execution.timed_out:
-        return _errored_result(
-            manifest=manifest,
-            agent=agent,
-            task=task,
-            workspace=workspace,
-            diff_path=diff_path,
-            grader_path=grader_path,
+        return ctx.errored(
             execution=execution,
-            error=f"agent timed out after {task.spec.timeout_s or timeout_s}s",
-            attempted_grader_read=attempted,
+            error=f"agent timed out after {effective_timeout_s}s",
+            attempted_grader_read=attempted_grader_read,
         )
 
     if execution.exit_code not in (0, None):
@@ -680,43 +795,41 @@ def _run_benchmark_job(
         # so harness-initiated kills aren't mistaken for the agent's own failure.
         code = execution.exit_code
         detail = f"killed by signal {-code}" if code < 0 else f"exited with code {code}"
-        return _errored_result(
-            manifest=manifest,
-            agent=agent,
-            task=task,
-            workspace=workspace,
-            diff_path=diff_path,
-            grader_path=grader_path,
+        return ctx.errored(
             execution=execution,
             error=f"agent {detail}",
-            attempted_grader_read=attempted,
+            attempted_grader_read=attempted_grader_read,
         )
+    return None
 
+
+def _grade_job(
+    *,
+    ctx: _JobContext,
+    execution: AgentExecution,
+    pgid_registry: set[int] | None,
+    pgid_lock: threading.Lock | None,
+    attempted_grader_read: bool,
+) -> TaskRunResult:
     try:
         grader = run_hidden_grader(
-            task,
-            workspace,
+            ctx.task,
+            ctx.workspace,
             pgid_registry=pgid_registry,
             pgid_lock=pgid_lock,
         )
-        grader_path.write_text(grader.model_dump_json(indent=2))
-        return _graded_result(
-            manifest=manifest,
-            agent=agent,
-            task=task,
-            workspace=workspace,
-            diff_path=diff_path,
-            grader_path=grader_path,
+        ctx.grader_path.write_text(grader.model_dump_json(indent=2))
+        return ctx.graded(
             execution=execution,
             grader=grader,
-            attempted_grader_read=attempted,
+            attempted_grader_read=attempted_grader_read,
         )
     except Exception as error:
         kind = (
             "grader_invalid_output" if isinstance(error, GraderInvalidOutput) else "grader_failed"
         )
         first_line = str(error).splitlines()[0] if str(error) else error.__class__.__name__
-        grader_path.write_text(
+        ctx.grader_path.write_text(
             json.dumps(
                 {
                     "error_kind": kind,
@@ -726,16 +839,10 @@ def _run_benchmark_job(
                 indent=2,
             )
         )
-        return _errored_result(
-            manifest=manifest,
-            agent=agent,
-            task=task,
-            workspace=workspace,
-            diff_path=diff_path,
-            grader_path=grader_path,
+        return ctx.errored(
             execution=execution,
             error=first_line,
-            attempted_grader_read=attempted,
+            attempted_grader_read=attempted_grader_read,
         )
 
 
@@ -745,10 +852,8 @@ def _ordered_completed_results(
     return [results_by_index[index] for index in range(total_jobs) if index in results_by_index]
 
 
-def _ordered_jobs(
-    agents: list[AgentSpec], tasks: list[TaskDefinition]
-) -> list[tuple[int, AgentSpec, TaskDefinition]]:
-    jobs: list[tuple[int, AgentSpec, TaskDefinition]] = []
+def _ordered_jobs(agents: list[AgentSpec], tasks: list[TaskDefinition]) -> list[_BenchmarkJob]:
+    jobs: list[_BenchmarkJob] = []
     for agent in agents:
         for task in tasks:
             jobs.append((len(jobs), agent, task))
@@ -775,6 +880,288 @@ def _resolve_provider_caps(
         if provider in caps:
             caps[provider] = min(cap, jobs)
     return caps
+
+
+@dataclass
+class _AbortState:
+    event: threading.Event
+    pgid_registry: set[int]
+    pgid_lock: threading.Lock
+
+    @classmethod
+    def create(cls) -> _AbortState:
+        return cls(
+            event=threading.Event(),
+            pgid_registry=set(),
+            pgid_lock=threading.Lock(),
+        )
+
+    def is_set(self) -> bool:
+        return self.event.is_set()
+
+    def trigger(self) -> None:
+        self.event.set()
+        # Hold pgid_lock across the whole TERM→grace→KILL sequence so a child
+        # cannot exit and have its pgid recycled by the OS between snapshot and
+        # signal — the registry stays authoritative for "is this pgid still ours?".
+        with self.pgid_lock:
+            pgids = list(self.pgid_registry)
+            for pgid in pgids:
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    continue
+            # Escalate to SIGKILL: a SIGTERM-ignoring agent CLI (node/python
+            # wrappers under the PTY shim) would otherwise survive the abort and
+            # keep burning API budget. Mirror kill_process_group's grace window.
+            time.sleep(KILL_GRACE_S)
+            for pgid in pgids:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    continue
+
+
+class _AbortedJob(Exception):
+    """Raised inside a worker when fail-fast aborts further work."""
+
+    def __init__(self, index: int) -> None:
+        super().__init__(f"job {index} aborted before start")
+        self.index = index
+
+
+def _append_result(path: Path, result: TaskRunResult) -> None:
+    # Append a single row in completion order. The final rewrite re-orders by
+    # declared index. Previously every completion rewrote the entire file, which
+    # was O(N²) bytes over a run.
+    with path.open("a") as handle:
+        handle.write(result.model_dump_json())
+        handle.write("\n")
+
+
+def _should_fail_fast_abort(result: TaskRunResult) -> bool:
+    # --fail-fast covers both 'errored' (capture/grader failure) and 'graded but
+    # failing'. A known-bad agent shouldn't burn the whole budget on tasks it
+    # can't pass.
+    return result.outcome_status == "errored" or (
+        result.outcome_status == "graded" and result.success is False
+    )
+
+
+def _run_job_and_report(
+    *,
+    manifest: RunManifest,
+    agent: AgentSpec,
+    task: TaskDefinition,
+    run_dir: Path,
+    timeout_s: int,
+    executor: Executor,
+    retry: int,
+    abort_state: _AbortState,
+    reporter: ReporterProtocol,
+    sandbox: bool,
+) -> TaskRunResult:
+    reporter.on_start(agent, task)
+    result = _run_benchmark_job(
+        manifest=manifest,
+        agent=agent,
+        task=task,
+        run_dir=run_dir,
+        timeout_s=timeout_s,
+        executor=executor,
+        retry=retry,
+        pgid_registry=abort_state.pgid_registry,
+        pgid_lock=abort_state.pgid_lock,
+        sandbox=sandbox,
+    )
+    reporter.on_finish(agent, task, result)
+    return result
+
+
+def _run_jobs_serial(
+    *,
+    ordered_jobs: list[_BenchmarkJob],
+    manifest: RunManifest,
+    run_dir: Path,
+    timeout_s: int,
+    executor: Executor,
+    retry: int,
+    abort_state: _AbortState,
+    reporter: ReporterProtocol,
+    sandbox: bool,
+    fail_fast: bool,
+    results_path: Path,
+    results_by_index: dict[int, TaskRunResult],
+) -> None:
+    for index, agent, task in ordered_jobs:
+        if abort_state.is_set():
+            break
+        result = _run_job_and_report(
+            manifest=manifest,
+            agent=agent,
+            task=task,
+            run_dir=run_dir,
+            timeout_s=timeout_s,
+            executor=executor,
+            retry=retry,
+            abort_state=abort_state,
+            reporter=reporter,
+            sandbox=sandbox,
+        )
+        results_by_index[index] = result
+        _append_result(results_path, result)
+        if fail_fast and _should_fail_fast_abort(result):
+            abort_state.trigger()
+
+
+def _run_jobs_parallel(
+    *,
+    ordered_jobs: list[_BenchmarkJob],
+    agents: list[AgentSpec],
+    jobs: int,
+    provider_jobs: dict[str, int] | None,
+    manifest: RunManifest,
+    run_dir: Path,
+    timeout_s: int,
+    executor: Executor,
+    retry: int,
+    abort_state: _AbortState,
+    reporter: ReporterProtocol,
+    sandbox: bool,
+    fail_fast: bool,
+    results_path: Path,
+    results_by_index: dict[int, TaskRunResult],
+) -> None:
+    caps = _resolve_provider_caps(agents, jobs=jobs, provider_jobs=provider_jobs)
+    global_sem = threading.BoundedSemaphore(jobs)
+    results_lock = threading.Lock()
+    pools: dict[str, ThreadPoolExecutor] = {
+        provider: ThreadPoolExecutor(
+            max_workers=caps[provider],
+            thread_name_prefix=f"heist-{provider}",
+        )
+        for provider in caps
+    }
+
+    def _worker(index: int, agent: AgentSpec, task: TaskDefinition) -> tuple[int, TaskRunResult]:
+        if abort_state.is_set():
+            raise _AbortedJob(index)
+        with global_sem:
+            if abort_state.is_set():
+                raise _AbortedJob(index)
+            result = _run_job_and_report(
+                manifest=manifest,
+                agent=agent,
+                task=task,
+                run_dir=run_dir,
+                timeout_s=timeout_s,
+                executor=executor,
+                retry=retry,
+                abort_state=abort_state,
+                reporter=reporter,
+                sandbox=sandbox,
+            )
+            return index, result
+
+    futures: dict[Future[tuple[int, TaskRunResult]], int] = {}
+    try:
+        for index, agent, task in ordered_jobs:
+            future = pools[agent.provider].submit(_worker, index, agent, task)
+            futures[future] = index
+
+        for future in as_completed(futures):
+            try:
+                index, result = future.result()
+            except _AbortedJob:
+                continue
+            except Exception:
+                abort_state.trigger()
+                raise
+            with results_lock:
+                results_by_index[index] = result
+                _append_result(results_path, result)
+            if fail_fast and _should_fail_fast_abort(result):
+                abort_state.trigger()
+    finally:
+        for pool in pools.values():
+            pool.shutdown(wait=True)
+
+
+def _finalize_run(
+    *,
+    manifest: RunManifest,
+    run_dir: Path,
+    results_path: Path,
+    results_by_index: dict[int, TaskRunResult],
+    total_jobs: int,
+    started: float,
+    abort_state: _AbortState,
+) -> tuple[RunManifest, list[TaskRunResult]]:
+    # Rewrite results.jsonl in declared-index order so consumers that read the
+    # file at end-of-run see a deterministic order regardless of completion
+    # order. The atomic write also closes any partial append from a crashed
+    # final row.
+    results = _ordered_completed_results(results_by_index, total_jobs)
+    write_jsonl(results_path, results)
+    # Finalize the manifest no matter how we exited so consumers can distinguish
+    # a completed run from a crash/abort.
+    status: RunStatus = "aborted" if abort_state.is_set() else "completed"
+    updated_manifest = manifest.model_copy(
+        update={
+            "completed_at": datetime.now(UTC),
+            "duration_s": time.monotonic() - started,
+            "status": status,
+        }
+    )
+    _write_manifest(run_dir, updated_manifest)
+    return updated_manifest, results
+
+
+def _create_run_dir(runs_dir: Path, run_id: str) -> Path:
+    run_dir = runs_dir / run_id
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise FileExistsError(f"Run already exists: {run_dir}") from error
+    return run_dir
+
+
+def _initial_manifest(
+    *,
+    repo_root: Path,
+    suite: str,
+    agents: list[AgentSpec],
+    tasks: list[TaskDefinition],
+    run_id: str,
+    run_dir: Path,
+    kind: str,
+    source_run_id: str | None,
+) -> RunManifest:
+    return RunManifest(
+        run_id=run_id,
+        suite=suite,
+        agent_ids=[agent.id for agent in agents],
+        task_ids=[task.id for task in tasks],
+        repo_root=str(repo_root),
+        run_dir=str(run_dir),
+        default_agents=DEFAULT_AGENT_IDS,
+        harness_git_sha=_capture_harness_sha(),
+        kind=kind,  # type: ignore[arg-type]
+        source_run_id=source_run_id,
+    )
+
+
+def _write_manifest(run_dir: Path, manifest: RunManifest) -> None:
+    (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=2))
+
+
+def _prepare_results_path(run_dir: Path) -> Path:
+    results_path = run_dir / "results.jsonl"
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    # Touch the file so consumers tailing it during the run don't trip on
+    # "file not found" before the first job completes.
+    results_path.touch()
+    return results_path
 
 
 def run_benchmark(
@@ -807,185 +1194,71 @@ def run_benchmark(
     executor = executor or LiveExecutor(sandbox=sandbox)
 
     run_id = validate_run_id(run_id or make_run_id())
-    run_dir = runs_dir / run_id
-    try:
-        run_dir.mkdir(parents=True, exist_ok=False)
-    except FileExistsError as error:
-        raise FileExistsError(f"Run already exists: {run_dir}") from error
+    run_dir = _create_run_dir(runs_dir, run_id)
     started = time.monotonic()
-
-    manifest = RunManifest(
-        run_id=run_id,
+    manifest = _initial_manifest(
+        repo_root=repo_root,
         suite=suite,
-        agent_ids=[agent.id for agent in agents],
-        task_ids=[task.id for task in tasks],
-        repo_root=str(repo_root),
-        run_dir=str(run_dir),
-        default_agents=DEFAULT_AGENT_IDS,
-        harness_git_sha=_capture_harness_sha(),
-        kind=kind,  # type: ignore[arg-type]
+        agents=agents,
+        tasks=tasks,
+        run_id=run_id,
+        run_dir=run_dir,
+        kind=kind,
         source_run_id=source_run_id,
     )
-    (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=2))
+    _write_manifest(run_dir, manifest)
 
     ordered_jobs = _ordered_jobs(agents, tasks)
     results_by_index: dict[int, TaskRunResult] = {}
-    results_lock = threading.Lock()
-    abort_event = threading.Event()
-    pgid_registry: set[int] = set()
-    pgid_lock = threading.Lock()
-    results_path = run_dir / "results.jsonl"
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    # Touch the file so consumers tailing it during the run don't trip on
-    # "file not found" before the first job completes.
-    results_path.touch()
-
-    def _append_result(result: TaskRunResult) -> None:
-        # Append a single row in completion order. The final rewrite (below)
-        # re-orders by declared index. Previously every completion rewrote
-        # the entire file, which was O(N²) bytes over a run.
-        with results_path.open("a") as handle:
-            handle.write(result.model_dump_json())
-            handle.write("\n")
-
-    def _should_abort(result: TaskRunResult) -> bool:
-        # --fail-fast covers both 'errored' (capture/grader failure) and
-        # 'graded but failing'. A known-bad agent shouldn't burn the whole
-        # budget on tasks it can't pass.
-        return result.outcome_status == "errored" or (
-            result.outcome_status == "graded" and result.success is False
-        )
-
-    def _trigger_abort() -> None:
-        abort_event.set()
-        # Hold pgid_lock across the whole TERM→grace→KILL sequence so a child
-        # cannot exit and have its pgid recycled by the OS between snapshot and
-        # signal — the registry stays authoritative for "is this pgid still ours?".
-        with pgid_lock:
-            pgids = list(pgid_registry)
-            for pgid in pgids:
-                try:
-                    os.killpg(pgid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    continue
-            # Escalate to SIGKILL: a SIGTERM-ignoring agent CLI (node/python
-            # wrappers under the PTY shim) would otherwise survive the abort and
-            # keep burning API budget. Mirror kill_process_group's grace window.
-            time.sleep(KILL_GRACE_S)
-            for pgid in pgids:
-                try:
-                    os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    continue
+    abort_state = _AbortState.create()
+    results_path = _prepare_results_path(run_dir)
 
     try:
         if jobs == 1:
-            for index, agent, task in ordered_jobs:
-                if abort_event.is_set():
-                    break
-                reporter.on_start(agent, task)
-                result = _run_benchmark_job(
-                    manifest=manifest,
-                    agent=agent,
-                    task=task,
-                    run_dir=run_dir,
-                    timeout_s=timeout_s,
-                    executor=executor,
-                    retry=retry,
-                    pgid_registry=pgid_registry,
-                    pgid_lock=pgid_lock,
-                    sandbox=sandbox,
-                )
-                results_by_index[index] = result
-                reporter.on_finish(agent, task, result)
-                _append_result(result)
-                if fail_fast and _should_abort(result):
-                    _trigger_abort()
+            _run_jobs_serial(
+                ordered_jobs=ordered_jobs,
+                manifest=manifest,
+                run_dir=run_dir,
+                timeout_s=timeout_s,
+                executor=executor,
+                retry=retry,
+                abort_state=abort_state,
+                reporter=reporter,
+                sandbox=sandbox,
+                fail_fast=fail_fast,
+                results_path=results_path,
+                results_by_index=results_by_index,
+            )
         else:
-            caps = _resolve_provider_caps(agents, jobs=jobs, provider_jobs=provider_jobs)
-            global_sem = threading.BoundedSemaphore(jobs)
-            pools: dict[str, ThreadPoolExecutor] = {
-                provider: ThreadPoolExecutor(
-                    max_workers=caps[provider],
-                    thread_name_prefix=f"heist-{provider}",
-                )
-                for provider in caps
-            }
-
-            def _worker(
-                index: int, agent: AgentSpec, task: TaskDefinition
-            ) -> tuple[int, TaskRunResult]:
-                if abort_event.is_set():
-                    raise _AbortedJob(index)
-                with global_sem:
-                    if abort_event.is_set():
-                        raise _AbortedJob(index)
-                    reporter.on_start(agent, task)
-                    result = _run_benchmark_job(
-                        manifest=manifest,
-                        agent=agent,
-                        task=task,
-                        run_dir=run_dir,
-                        timeout_s=timeout_s,
-                        executor=executor,
-                        retry=retry,
-                        pgid_registry=pgid_registry,
-                        pgid_lock=pgid_lock,
-                        sandbox=sandbox,
-                    )
-                    reporter.on_finish(agent, task, result)
-                    return index, result
-
-            futures: dict[Future[tuple[int, TaskRunResult]], int] = {}
-            try:
-                for index, agent, task in ordered_jobs:
-                    future = pools[agent.provider].submit(_worker, index, agent, task)
-                    futures[future] = index
-
-                for future in as_completed(futures):
-                    try:
-                        index, result = future.result()
-                    except _AbortedJob:
-                        continue
-                    except Exception:
-                        _trigger_abort()
-                        raise
-                    with results_lock:
-                        results_by_index[index] = result
-                        _append_result(result)
-                    if fail_fast and _should_abort(result):
-                        _trigger_abort()
-            finally:
-                for pool in pools.values():
-                    pool.shutdown(wait=True)
+            _run_jobs_parallel(
+                ordered_jobs=ordered_jobs,
+                agents=agents,
+                jobs=jobs,
+                provider_jobs=provider_jobs,
+                manifest=manifest,
+                run_dir=run_dir,
+                timeout_s=timeout_s,
+                executor=executor,
+                retry=retry,
+                abort_state=abort_state,
+                reporter=reporter,
+                sandbox=sandbox,
+                fail_fast=fail_fast,
+                results_path=results_path,
+                results_by_index=results_by_index,
+            )
     finally:
-        # Rewrite results.jsonl in declared-index order so consumers that
-        # read the file at end-of-run see a deterministic order regardless
-        # of completion order. The atomic write also closes any partial
-        # append from a crashed final row.
-        results = _ordered_completed_results(results_by_index, len(ordered_jobs))
-        write_jsonl(results_path, results)
-        # Finalize the manifest no matter how we exited so consumers can
-        # distinguish a completed run from a crash/abort.
-        status: RunStatus = "aborted" if abort_event.is_set() else "completed"
-        manifest = manifest.model_copy(
-            update={
-                "completed_at": datetime.now(UTC),
-                "duration_s": time.monotonic() - started,
-                "status": status,
-            }
+        manifest, results = _finalize_run(
+            manifest=manifest,
+            run_dir=run_dir,
+            results_path=results_path,
+            results_by_index=results_by_index,
+            total_jobs=len(ordered_jobs),
+            started=started,
+            abort_state=abort_state,
         )
-        (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=2))
 
     return manifest, results
-
-
-class _AbortedJob(Exception):
-    """Raised inside a worker when fail-fast aborts further work."""
-
-    def __init__(self, index: int) -> None:
-        super().__init__(f"job {index} aborted before start")
-        self.index = index
 
 
 def load_results(run_dir: Path) -> list[TaskRunResult]:
